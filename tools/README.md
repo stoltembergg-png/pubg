@@ -24,6 +24,12 @@ rewriting it:
 python tools/dump_offsets.py --input PubgExt/offsetdump.txt --output PubgExt/Config/Offsets.h --check
 ```
 
+The generator preserves the project's historical names through aliases and
+applies the reflected-field overrides verified against the local SDK build
+`2609.1.1.93`. Fields used by legacy code without a matching SDK property are
+kept for compatibility and emitted with a `TODO` comment; their values must be
+verified at runtime before relying on them.
+
 ## Dumps locais
 
 Os dumps do SDK, incluindo `2609.1.1.93/`, são gerados localmente e estão

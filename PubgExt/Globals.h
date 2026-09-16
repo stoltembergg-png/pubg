@@ -1,7 +1,10 @@
 #pragma once
 #include "Engine.h"
+#include "Config/Offsets.h"
 
-// TODO: OFFSET is deprecated; new consumers should use Config/Offsets.h.
+// TODO: OFFSET values are canonical in Config/Offsets.h.  This compatibility
+// view keeps the existing SDK.<name> call sites source-compatible without
+// maintaining a second copy of the offsets.
 
 extern std::shared_ptr<Engine> EngineInstance;
 extern std::string ProcessName;
@@ -21,95 +24,91 @@ struct _Local
 	std::map<int, std::string> KV;
 }inline Local;
 
-struct OFFSET {
-	uint64_t GNames_offset = 0x10;
-	uint64_t UWorld = 0x1225F938; 
-	uint64_t Decrypt = 0x1079C028;
-	uint64_t GNames = 0x124EF760;
-	uint32_t ElementsPerChunk = 0x3E4C;
+#define SDK_OFFSET_REF(name) const std::uint64_t& name = OFFSET::name;
+struct SDKOffsets {
+	SDK_OFFSET_REF(GNames_offset)
+	SDK_OFFSET_REF(UWorld)
+	SDK_OFFSET_REF(Decrypt)
+	SDK_OFFSET_REF(GNames)
+	SDK_OFFSET_REF(ElementsPerChunk)
+	SDK_OFFSET_REF(Offset)
+	SDK_OFFSET_REF(NameIndexXor1)
+	SDK_OFFSET_REF(NameIndexOne)
+	SDK_OFFSET_REF(NameIndexTwo)
+	SDK_OFFSET_REF(NameIndexXor2)
+	SDK_OFFSET_REF(NameIsROR)
+	SDK_OFFSET_REF(CurrentLevel)
+	SDK_OFFSET_REF(GameInstance)
+	SDK_OFFSET_REF(LocalPlayers)
+	SDK_OFFSET_REF(Actors)
+	SDK_OFFSET_REF(ObjectID)
+	SDK_OFFSET_REF(PlayerController)
+	SDK_OFFSET_REF(AcknowledgedPawn)
+	SDK_OFFSET_REF(PlayerCameraManager)
+	SDK_OFFSET_REF(RootComponent)
+	SDK_OFFSET_REF(PlayerState)
+	SDK_OFFSET_REF(PlayerStatistics)
+	SDK_OFFSET_REF(Mesh)
+	SDK_OFFSET_REF(AnimScriptInstance)
+	SDK_OFFSET_REF(StaticMesh)
+	SDK_OFFSET_REF(LastRenderTimeOnScreen)
+	SDK_OFFSET_REF(Health)
+	SDK_OFFSET_REF(HeaFlag)
+	SDK_OFFSET_REF(Health1)
+	SDK_OFFSET_REF(Health2)
+	SDK_OFFSET_REF(Health3)
+	SDK_OFFSET_REF(Health4)
+	SDK_OFFSET_REF(Health5)
+	SDK_OFFSET_REF(Health6)
+	SDK_OFFSET_REF(HealthXorKey0)
+	SDK_OFFSET_REF(HealthXorKey1)
+	SDK_OFFSET_REF(HealthXorKey2)
+	SDK_OFFSET_REF(HealthXorKey3)
+	SDK_OFFSET_REF(HealthXorKey4)
+	SDK_OFFSET_REF(HealthXorKey5)
+	SDK_OFFSET_REF(HealthXorKey6)
+	SDK_OFFSET_REF(HealthXorKey7)
+	SDK_OFFSET_REF(HealthXorKey8)
+	SDK_OFFSET_REF(HealthXorKey9)
+	SDK_OFFSET_REF(HealthXorKey10)
+	SDK_OFFSET_REF(HealthXorKey11)
+	SDK_OFFSET_REF(HealthXorKey12)
+	SDK_OFFSET_REF(HealthXorKey13)
+	SDK_OFFSET_REF(HealthXorKey14)
+	SDK_OFFSET_REF(HealthXorKey15)
+	SDK_OFFSET_REF(GroggyHealth)
+	SDK_OFFSET_REF(LastTeamNum)
+	SDK_OFFSET_REF(CharacterName)
+	SDK_OFFSET_REF(SpectatedCount)
+	SDK_OFFSET_REF(Eyes)
+	SDK_OFFSET_REF(WorldToMap)
+	SDK_OFFSET_REF(ComponentToWorld)
+	SDK_OFFSET_REF(ComponentLocation)
+	SDK_OFFSET_REF(ComponentVelocity)
+	SDK_OFFSET_REF(CameraFov)
+	SDK_OFFSET_REF(CameraRot)
+	SDK_OFFSET_REF(CameraPos)
+	SDK_OFFSET_REF(ItemID)
+	SDK_OFFSET_REF(ItemTable)
+	SDK_OFFSET_REF(DroppedItemGroup)
+	SDK_OFFSET_REF(DroppedItemGroup_UItem)
+	SDK_OFFSET_REF(WeaponProcessor)
+	SDK_OFFSET_REF(EquippedWeapons)
+	SDK_OFFSET_REF(CurrentWeaponIndex)
+	SDK_OFFSET_REF(WeaponTrajectoryData)
+	SDK_OFFSET_REF(TrajectoryGravityZ)
+	SDK_OFFSET_REF(TrajectoryConfig)
+	SDK_OFFSET_REF(ControlRotation_CP)
+	SDK_OFFSET_REF(RecoilADSRotation_CP)
+	SDK_OFFSET_REF(LeanLeftAlpha_CP)
+	SDK_OFFSET_REF(LeanRightAlpha_CP)
+	SDK_OFFSET_REF(AimOffsets)
+	SDK_OFFSET_REF(ReplicatedMovement)
+	SDK_OFFSET_REF(VehicleRiderComponent)
+	SDK_OFFSET_REF(LastVehiclePawn)
+	SDK_OFFSET_REF(TimeTillExplosion)
+	SDK_OFFSET_REF(ExplodeState)
+};
+#undef SDK_OFFSET_REF
 
-	uint32_t Offset = 0x0020;
-	uint64_t NameIndexXor1 = 0x7360F24;
-	uint32_t NameIndexOne = 0x0007;
-	uint32_t NameIndexTwo = 0x0019;
-	uint64_t NameIndexXor2 = 0xB621EC05;
-	uint32_t NameIsROR = 0x0001; 
-
-	uint32_t CurrentLevel = 0x800;
-	uint32_t GameInstance = 0x3B0;
-	uint32_t LocalPlayers = 0xF0;
-	uint32_t Actors = 0x38;
-	uint32_t ObjectID = 0x20;
-	uint32_t PlayerController = 0x38;
-	uint32_t AcknowledgedPawn = 0x4A8;
-	uint32_t PlayerCameraManager = 0x4D0;
-	uint32_t RootComponent = 0x308;
-	uint32_t PlayerState = 0x418;
-	uint32_t PlayerStatistics = 0xA10;
-	uint32_t Mesh = 0x4A0;
-	uint32_t AnimScriptInstance = 0xE30;
-	uint32_t StaticMesh = 0xAE8; 
-	uint32_t LastRenderTimeOnScreen = 0x75C;
-	uint32_t Health = 0xA3C;
-	uint32_t HeaFlag = 0x3B9;
-	uint32_t Health1 = 0xA3C;
-	uint32_t Health2 = 0xA38;
-	uint32_t Health3 = 0xA24;
-	uint32_t Health4 = 0xA10;
-	uint32_t Health5 = 0xA25;
-	uint32_t Health6 = 0xA20;
-	uint64_t HealthXorKey0 = 0xCEC7A593;
-	uint64_t HealthXorKey1 = 0x9B63B2A7;
-	uint64_t HealthXorKey2 = 0xCAD3C3A5;
-	uint64_t HealthXorKey3 = 0xA738484B;
-	uint64_t HealthXorKey4 = 0xCC911D0A;
-	uint64_t HealthXorKey5 = 0x23DDA185;
-	uint64_t HealthXorKey6 = 0x09454BC8;
-	uint64_t HealthXorKey7 = 0xA521BA21;
-	uint64_t HealthXorKey8 = 0x0BA17A58;
-	uint64_t HealthXorKey9 = 0xB0EFA787;
-	uint64_t HealthXorKey10 = 0xE275B2BA;
-	uint64_t HealthXorKey11 = 0x878ADBD0;
-	uint64_t HealthXorKey12 = 0xBDCC62D5;
-	uint64_t HealthXorKey13 = 0xA7934B07;
-	uint64_t HealthXorKey14 = 0x4B099E38;
-	uint64_t HealthXorKey15 = 0xEEDB2A7D;
-
-	uint32_t GroggyHealth = 0x14B0; 
-	uint32_t LastTeamNum = 0x2A98;
-	uint32_t CharacterName = 0x1D70; 
-	uint32_t SpectatedCount = 0x113C;
-	uint32_t Eyes = 0x75C;
-
-	uint32_t WorldToMap = 0xA04;
-	uint32_t ComponentToWorld = 0x320;
-	uint32_t ComponentLocation = 0x330;
-	uint32_t ComponentVelocity = 0x23C;
-	uint32_t CameraFov = 0xA2C;
-	uint32_t CameraRot = 0xA10;
-	uint32_t CameraPos = 0xA30;
-
-	uint32_t ItemID = 0x244;
-	uint32_t ItemTable = 0xB0;
-	uint32_t DroppedItemGroup = 0x1C0;
-	uint32_t DroppedItemGroup_UItem = 0x870;
-
-	uint32_t WeaponProcessor = 0x968;
-	uint32_t EquippedWeapons = 0x208;
-	uint32_t CurrentWeaponIndex = 0x319;
-	uint32_t WeaponTrajectoryData = 0x11A8;
-	uint32_t TrajectoryGravityZ = 0x106C;
-	uint32_t TrajectoryConfig = 0x108;
-	uint32_t ControlRotation_CP = 0x064C; 
-	uint32_t RecoilADSRotation_CP = 0x824; 
-	uint32_t LeanLeftAlpha_CP = 0x694; 
-	uint32_t LeanRightAlpha_CP = 0x698; 
-
-	uint32_t AimOffsets = 0x1AB8;
-	uint32_t ReplicatedMovement = 0xD0;
-	uint32_t VehicleRiderComponent = 0x2050;
-	uint32_t LastVehiclePawn = 0x270;
-
-	uint32_t TimeTillExplosion = 0x824;
-	uint32_t ExplodeState = 0x628;
-}inline SDK;
+inline SDKOffsets SDK;

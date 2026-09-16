@@ -25,6 +25,8 @@ namespace
 
     constexpr NTSTATUS kStatusInvalidCid = static_cast<NTSTATUS>(0xC000000B);
     constexpr NTSTATUS kStatusInfoLengthMismatch = static_cast<NTSTATUS>(0xC0000004);
+    constexpr NTSTATUS kStatusConnectionActive = static_cast<NTSTATUS>(0xC0000100);
+    constexpr NTSTATUS kStatusAlreadyCommitted = static_cast<NTSTATUS>(0xC0000021);
     constexpr NTSTATUS kStatusImageAlreadyLoaded = static_cast<NTSTATUS>(0xC000010E);
 
     void DebugLog(const char* format, ...)
@@ -40,6 +42,15 @@ namespace
     bool NtSucceeded(NTSTATUS status)
     {
         return status >= 0;
+    }
+
+    // The mapper can return these benign/informational statuses after the
+    // driver is usable (for example, when it is already active or committed).
+    bool IsBenignLoadStatus(NTSTATUS status)
+    {
+        return status == kStatusConnectionActive ||
+               status == kStatusAlreadyCommitted ||
+               status == kStatusImageAlreadyLoaded;
     }
 
     LSTATUS PrepareDriverRegEntry(const std::wstring& serviceName, const std::wstring& path)
@@ -292,7 +303,7 @@ bool DriverInterfaceV3::Initialize()
     const bool mapperExists = !mapperPath.empty() &&
         GetFileAttributesW(mapperPath.c_str()) != INVALID_FILE_ATTRIBUTES;
     const NTSTATUS status = LoadDriver(L"ReadWriteDriver", mapperExists ? mapperPath : L"");
-    if (!NtSucceeded(status) && status != kStatusImageAlreadyLoaded)
+    if (!NtSucceeded(status) && !IsBenignLoadStatus(status))
     {
         DebugLog("ReadWriteDriver: NtLoadDriver failed (0x%08X)\n",
                  static_cast<unsigned int>(status));
@@ -488,18 +499,29 @@ bool DriverInterfaceV3::WriteMemory(DWORD pid, uintptr_t address, const void* bu
     return NtSucceeded(status);
 }
 
-bool DriverInterfaceV3::BatchReadMemory(DWORD pid, BatchReadEntry* entries, size_t count) const
+bool DriverInterfaceV3::BatchReadMemory(DWORD pid, BatchReadEntry* entries, size_t count,
+                                         size_t* successfulCount) const
 {
     if (!driverLoaded_ || (!entries && count != 0))
         return false;
 
+    size_t successes = 0;
+
     for (size_t index = 0; index < count; ++index)
     {
-        if (!ReadMemory(pid, entries[index].address, entries[index].buffer,
-                        entries[index].size))
-            return false;
+        entries[index].success = ReadMemory(pid, entries[index].address,
+                                             entries[index].buffer, entries[index].size);
+        if (entries[index].success)
+            ++successes;
     }
-    return true;
+
+    if (successfulCount)
+        *successfulCount = successes;
+
+    // Preserve the existing bool contract: true means every slot succeeded.
+    // Individual failures are recorded above and never abort the remaining
+    // reads in the batch.
+    return successes == count;
 }
 
 void DriverInterfaceV3::InjectMouseMove(int /*moveX*/, int /*moveY*/) const

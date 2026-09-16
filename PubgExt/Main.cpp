@@ -74,8 +74,26 @@ bool InitializeFeatures() {
 		return false;
 	}
 
-	while (!TargetProcess.FixCr3()) {
-		std::this_thread::sleep_for(std::chrono::seconds(3));
+	// FixCr3 is not currently backed by a functional user-mode protocol
+	// command.  Bound the compatibility fallback so startup can never spin
+	// forever while waiting for an unavailable CR3 resolver.
+	constexpr int kMaxCr3Retries = 3;
+	bool cr3_resolved = false;
+	for (int attempt = 1; attempt <= kMaxCr3Retries; ++attempt) {
+		if (TargetProcess.FixCr3()) {
+			cr3_resolved = true;
+			break;
+		}
+
+		LOG("[!] FixCr3 attempt %d/%d failed; CR3 resolver unavailable.\n",
+			attempt, kMaxCr3Retries);
+		if (attempt < kMaxCr3Retries)
+			std::this_thread::sleep_for(std::chrono::seconds(3));
+	}
+	if (!cr3_resolved) {
+		// Current ReadWriteDriver memory commands do not consume this value;
+		// continue in degraded mode instead of blocking all feature startup.
+		LOG("[!] Continuing without resolved CR3 (degraded mode).\n");
 	}
 	
 	EngineInstance = std::make_shared<Engine>();

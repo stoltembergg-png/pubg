@@ -17,6 +17,7 @@
 
 # Build directories
 [Bb]uild/
+[Bb]uild-*/
 [Dd]ebug/
 [Rr]elease/
 x64/

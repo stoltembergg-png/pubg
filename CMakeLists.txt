@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(USE_VENDOR_JSON "Use the vendored PubgExt/json/json.hpp header" ON)
 option(USE_VMMDLL "Build the legacy VMMDLL keyboard/registry sources" OFF)
+option(BUILD_TESTS "Build the GoogleTest unit tests" OFF)
 
 # Keep this list aligned with the sources enabled by PubgExt/PubgExt.vcxproj.
 # The repository also contains legacy DMA/VMMDLL sources which are not part of
@@ -146,3 +147,51 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt" FILES
     ${PUBGEXT_ASM_SOURCES}
     ${PUBGEXT_RESOURCE_SOURCES}
 )
+
+if(BUILD_TESTS)
+    include(CTest)
+    include(FetchContent)
+
+    set(gtest_force_shared_crt ON CACHE BOOL "Use the shared MSVC runtime" FORCE)
+    FetchContent_Declare(
+        googletest
+        URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+    )
+    FetchContent_MakeAvailable(googletest)
+
+    add_executable(pubg_tests
+        tests/test_vector.cpp
+        tests/test_camera.cpp
+        tests/test_config.cpp
+        PubgExt/Misc/Vector.cpp
+        PubgExt/SDK/Camera.cpp
+        PubgExt/Config/ConfigUtilities.cpp
+    )
+
+    target_include_directories(pubg_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests"
+        "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/Config"
+        "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/SDK"
+        "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/Misc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/Misc/Pch"
+        "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/Security"
+        "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/Memory"
+        "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/driver"
+        "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/json"
+        "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/OS-ImGui"
+        "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/OS-ImGui/imgui"
+    )
+
+    target_compile_definitions(pubg_tests PRIVATE
+        USE_VENDOR_JSON=1
+    )
+
+    if(MSVC)
+        target_compile_options(pubg_tests PRIVATE /W3 /permissive- /EHsc)
+    endif()
+
+    target_link_libraries(pubg_tests PRIVATE GTest::gtest_main)
+
+    add_test(NAME pubg_tests COMMAND pubg_tests)
+endif()

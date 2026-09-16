@@ -22,6 +22,7 @@ public:
         uintptr_t address{};
         size_t size{};
         void* buffer{};
+        bool success{ false };
     };
 
     bool Initialize();
@@ -39,7 +40,10 @@ public:
                     const char* debugName = nullptr) const;
     bool WriteMemory(DWORD pid, uintptr_t address, const void* buffer, size_t size,
                      const char* debugName = nullptr) const;
-    bool BatchReadMemory(DWORD pid, BatchReadEntry* entries, size_t count) const;
+    // TODO: FindRealCr3/GetProcessCr3 remain public for compatibility, but
+    // have no functional consumer until CR3 is exposed by the shared command.
+    bool BatchReadMemory(DWORD pid, BatchReadEntry* entries, size_t count,
+                         size_t* successfulCount = nullptr) const;
 
     void InjectMouseMove(int moveX, int moveY) const;
     void TestRandomMouseMoveLoop(std::atomic<bool>& running) const;

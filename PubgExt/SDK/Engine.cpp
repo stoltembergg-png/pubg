@@ -668,7 +668,7 @@ void Engine::UpdateGrenades() {
 void Engine::GetGNames()
 {
 	GNames = xe_decrypt(SafeRead<uint64_t>(CachedBaseAddress + SDK.GNames, "GNamesArray"));
-	GNames = xe_decrypt(SafeRead<uint64_t>(GNames + 0x10, "GNamesPtr"));
+	GNames = xe_decrypt(SafeRead<uint64_t>(GNames + SDK.GNames_offset, "GNamesPtr"));
 }
 struct StringA
 {
