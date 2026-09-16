@@ -10,9 +10,12 @@ on:
       - main
       - master
 
+env:
+  WINDOWS_SDK_10_VERSION: 10.0.26100.0
+
 jobs:
   build-windows:
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,16 +24,19 @@ jobs:
         uses: microsoft/setup-msbuild@v2
 
       - name: Build solution
-        run: msbuild PubgExt.sln /p:Configuration=Release /p:Platform=x64
+        run: msbuild PubgExt.sln /p:Configuration=Release /p:Platform=x64 /p:WindowsTargetPlatformVersion=${{ env.WINDOWS_SDK_10_VERSION }}
 
   cmake:
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Configure CMake
-        run: cmake -B build -S .
+        run: cmake -B build -S . -G "Visual Studio 17 2022" -A x64
+
+      - name: Build CMake project
+        run: cmake --build build --config Release
 
   # Static-only compatibility verification. This job never loads a kernel
   # driver; real load testing requires a self-hosted runner with a VM snapshot
@@ -45,15 +51,20 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Build PubgExt for compatibility checks
-        run: msbuild PubgExt.sln /p:Configuration=Release /p:Platform=x64
+        run: msbuild PubgExt.sln /p:Configuration=Release /p:Platform=x64 /p:WindowsTargetPlatformVersion=${{ env.WINDOWS_SDK_10_VERSION }}
 
       - name: Check generated offsets
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           if (Test-Path -LiteralPath 'tools\dump_offsets.py') {
-            python tools\dump_offsets.py --input PubgExt\offsetdump.txt --output PubgExt\Config\Offsets.h --check
+            python tools/dump_offsets.py --input PubgExt/offsetdump.txt --output PubgExt/Config/Offsets.h --check
           } else {
             Write-Host 'tools\dump_offsets.py not present; skipping offset check.'
           }
@@ -130,6 +141,35 @@ jobs:
           }
           Write-Host 'win32kbase offset table found and connected to GetWin32FreePoolOffset.'
 
+      - name: Verify embedded driver payload
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $driverPath = Join-Path $PWD 'ReadWriteDriver\ReadWriteDriver\x64\Release\ReadWriteDriver.sys'
+          if (-not (Test-Path -LiteralPath $driverPath)) {
+            Write-Host 'ReadWriteDriver.sys not found; skipping embedded payload verification.'
+            exit 0
+          }
+
+          $headerPath = Join-Path $PWD 'ReadWriteDriver\ReadWriteDriverMapper\driver.h'
+          if (-not (Test-Path -LiteralPath $headerPath)) {
+            throw 'Embedded payload header ReadWriteDriverMapper\driver.h is missing.'
+          }
+
+          $headerText = Get-Content -LiteralPath $headerPath -Raw
+          $hexData = [regex]::Match($headerText, '(?m)\bunsigned\s+char\s+hexData\s*\[\s*(?<declared>\d+)\s*\]\s*=')
+          if (-not $hexData.Success) {
+            throw 'hexData array was not found in ReadWriteDriverMapper\driver.h.'
+          }
+
+          $declaredSize = [int]$hexData.Groups['declared'].Value
+          $driverSize = (Get-Item -LiteralPath $driverPath).Length
+          if ($driverSize -ne $declaredSize) {
+            throw "Embedded driver payload size mismatch: ReadWriteDriver.sys is $driverSize bytes; hexData declares $declaredSize bytes."
+          }
+          Write-Host "Embedded driver payload size matches ReadWriteDriver.sys ($driverSize bytes declared by hexData)."
+
       - name: Optional static analysis
         id: static-analysis
         continue-on-error: true
@@ -148,9 +188,9 @@ jobs:
             msbuild PubgExt.sln /p:Configuration=Release /p:Platform=x64 /p:RunCodeAnalysis=true
           }
 
-  # Opcional: requer o WDK instalado no runner. Falhas não bloqueiam o CI.
+  # Opcional/best-effort: o WDK é obtido via NuGet. Falhas não bloqueiam o CI.
   build-driver:
-    runs-on: windows-latest
+    runs-on: windows-2022
     continue-on-error: true
     steps:
       - name: Checkout
@@ -159,13 +199,39 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      - name: Install WDK from NuGet
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $nuget = Join-Path $env:RUNNER_TEMP 'nuget.exe'
+          Invoke-WebRequest -Uri 'https://dist.nuget.org/win-x86-commandline/latest/nuget.exe' -OutFile $nuget
+
+          $search = Invoke-RestMethod -Uri 'https://azuresearch-usnc.nuget.org/query?q=Microsoft.WindowsWDK&prerelease=false&semVerLevel=2.0.0'
+          $package = @($search.data | Where-Object { $_.id -eq 'Microsoft.WindowsWDK.x64' } | Select-Object -First 1)
+          if (-not $package) {
+            throw 'Microsoft.WindowsWDK.x64 NuGet package was not found.'
+          }
+
+          $versions = @($package.versions | ForEach-Object {
+            if ($_ -is [string]) { $_ } else { $_.version }
+          } | Where-Object { $_ -like "$($env:WINDOWS_SDK_10_VERSION -replace '\.0$', '')*" } | Sort-Object { [version]$_ } -Descending)
+          if (-not $versions) {
+            throw "No $($package.id) package matching Windows SDK $env:WINDOWS_SDK_10_VERSION was found."
+          }
+
+          $wdkRoot = Join-Path $env:RUNNER_TEMP 'wdk'
+          & $nuget install $package.id -Version $versions[0] -OutputDirectory $wdkRoot -NonInteractive -NoCache
+          if ($LASTEXITCODE -ne 0) { throw "NuGet failed to install $($package.id)." }
+          "WDK_NUGET_ROOT=$wdkRoot\$($package.id).$($versions[0])" >> $env:GITHUB_ENV
+
       - name: Check WDK
         id: wdk
         shell: pwsh
         run: |
           $wdkHeaders = @(
             "$env:ProgramFiles\Windows Kits\10\Include\*\km\ntddk.h",
-            "${env:ProgramFiles(x86)}\Windows Kits\10\Include\*\km\ntddk.h"
+            "${env:ProgramFiles(x86)}\Windows Kits\10\Include\*\km\ntddk.h",
+            "$env:WDK_NUGET_ROOT\Include\*\km\ntddk.h"
           )
           if ($wdkHeaders | Where-Object { Test-Path $_ }) {
             "installed=true" >> $env:GITHUB_OUTPUT
@@ -176,8 +242,15 @@ jobs:
           }
 
       - name: Build driver solution
+        id: driver_build
         if: steps.wdk.outputs.installed == 'true'
-        run: msbuild ReadWriteDriver/ReadWriteKernel.sln /p:Configuration=Release /p:Platform=x64
+        shell: pwsh
+        run: msbuild ReadWriteDriver/ReadWriteKernel.sln /p:Configuration=Release /p:Platform=x64 /p:WindowsTargetPlatformVersion=${{ env.WINDOWS_SDK_10_VERSION }} /p:WDKContentRoot="$env:WDK_NUGET_ROOT"
+
+      - name: Warn when driver build fails
+        if: failure() && steps.driver_build.outcome == 'failure'
+        shell: pwsh
+        run: Write-Output '::warning::Driver build failed: it requires the WDK and the WindowsKernelModeDriver10.0 KMDF toolset; real load validation requires a self-hosted runner with a VM snapshot.'
 
       - name: Report skipped driver build
         if: steps.wdk.outputs.installed != 'true'

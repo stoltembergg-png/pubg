@@ -10,6 +10,22 @@ A kernel driver for reading and writing memory. Contains a test that writes to n
  - ReadWriteDriverMapper.sys allocates non-paged memory with `MmAllocateIndependentPages()`, and then sets its page protection to make it executable memory with `MmSetPageProtection()`
  - ReadWriteDriver.sys attaches to a usermode process that loads user32.dll (in this case, ReadWriteUser.exe) to gain access to `win32kbase.sys;NtUserSetSysColors` and overwrites a global pointer in `NtUserSetSysColors()` for its hook
 
+# Rebuilding the embedded payload
+
+`ReadWriteDriverMapper/driver.c` treats `hexData` as the raw `.sys` file: it reads the PE headers, copies each section from `PointerToRawData` to its `VirtualAddress`, then fixes imports and relocations. Regenerate the array after building the current driver:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File ReadWriteDriver/tools/embed_payload.ps1
+```
+
+The default input is `ReadWriteDriver/x64/Release/ReadWriteDriver.sys` and the output is `ReadWriteDriver/ReadWriteDriverMapper/driver.h`. A custom input/output can be supplied as positional arguments:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File ReadWriteDriver/tools/embed_payload.ps1 <driver.sys> <output.h>
+```
+
+The script emits 16 bytes per line and derives the array size from the input, so `sizeof(hexData)` remains equal to the `.sys` file size.
+
 # Credits
 • JD96 for answering questions, of course! ☺️
 
