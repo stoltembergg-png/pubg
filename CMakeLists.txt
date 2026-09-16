@@ -7,12 +7,43 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(USE_VENDOR_JSON "Use the vendored PubgExt/json/json.hpp header" ON)
+option(USE_VMMDLL "Build the legacy VMMDLL keyboard/registry sources" OFF)
 
-# Keep the CMake target in sync with the source tree, including SDK, ESP,
-# memory, misc, OS-ImGui, configuration, and driver implementation sources.
-file(GLOB_RECURSE PUBGEXT_SOURCES CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/*.cpp"
+# Keep this list aligned with the sources enabled by PubgExt/PubgExt.vcxproj.
+# The repository also contains legacy DMA/VMMDLL sources which are not part of
+# that project and require an external VMMDLL SDK.
+set(PUBGEXT_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/Config/ConfigUtilities.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/ESP/PlayerEsp.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/ESP/Radar.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/Main.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/Memory/Memory.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/Misc/CheatFunction.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/Misc/Pch/Pch.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/Misc/Vector.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/OS-ImGui/OS-ImGui.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/OS-ImGui/OS-ImGui_Base.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/OS-ImGui/OS-ImGui_External.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/OS-ImGui/imgui/imgui.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/OS-ImGui/imgui/imgui_demo.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/OS-ImGui/imgui/imgui_draw.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/OS-ImGui/imgui/imgui_impl_dx11.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/OS-ImGui/imgui/imgui_impl_win32.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/OS-ImGui/imgui/imgui_tables.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/OS-ImGui/imgui/imgui_widgets.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/SDK/ActorEntity.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/SDK/Aimbot.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/SDK/Camera.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/SDK/Engine.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/driver/driver_interface_v3.cpp"
 )
+
+if(USE_VMMDLL)
+    list(APPEND PUBGEXT_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/Memory/InputManager.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/Memory/Registry.cpp"
+    )
+endif()
 
 file(GLOB_RECURSE PUBGEXT_HEADERS CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/*.h"
@@ -31,7 +62,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/PubgExt/resource.rc")
     )
 endif()
 
-add_executable(RuntimeBroker
+add_executable(RuntimeBroker WIN32
     ${PUBGEXT_SOURCES}
     ${PUBGEXT_HEADERS}
     ${PUBGEXT_ASM_SOURCES}
@@ -83,7 +114,11 @@ target_compile_definitions(RuntimeBroker PRIVATE
 )
 
 if(MSVC)
-    target_compile_options(RuntimeBroker PRIVATE /W3 /permissive- /EHsc)
+    target_compile_options(RuntimeBroker PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:/W3>
+        $<$<COMPILE_LANGUAGE:CXX>:/permissive->
+        $<$<COMPILE_LANGUAGE:CXX>:/EHsc>
+    )
 endif()
 
 target_link_libraries(RuntimeBroker PRIVATE

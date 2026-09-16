@@ -7,6 +7,11 @@
 #include <codecvt>
 #include <locale>
 #include <algorithm>
+
+#ifndef MAX_BATCH_ENTRIES
+#define MAX_BATCH_ENTRIES 256
+#endif
+
 Engine::Engine()
 {
 	CachedBaseAddress = TargetProcess.GetBaseAddress(ProcessName);
