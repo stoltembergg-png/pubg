@@ -1,0 +1,75 @@
+# Visual Studio / MSBuild
+.vs/
+.suo
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.opendb
+*.VC.db-shm
+*.VC.db-wal
+*.opendb
+*.opensdf
+*.sdf
+*.ncb
+*.aps
+
+# Build directories
+[Bb]uild/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+out/
+ipch/
+
+# MSBuild intermediate files
+*.tlog
+*.lastbuildstate
+*.log
+*.obj
+*.iobj
+*.pdb
+*.ipdb
+*.ilk
+*.idb
+*.pch
+*.res
+*.bsc
+*.sbr
+*.tmp
+
+# Binaries and libraries
+*.exe
+*.dll
+*.exp
+*.lib
+
+# Crash dumps and profiling output
+*.dmp
+*.pgc
+*.pgd
+*.cache
+
+# Generated/runtime files
+logs.txt
+*.userprefs
+*.pidb
+*.booproj
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Ignore vendored directory contents while preserving their placeholders
+Lib/**
+!Lib/.gitkeep
+Include/**
+!Include/.gitkeep
+
+# PUBG SDK dumps (gerados, muito grandes - ~100MB - não versionar)
+2609.1.1.93/
+**/DUMP/
+SDK_*.hpp

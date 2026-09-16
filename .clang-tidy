@@ -1,0 +1,4 @@
+Checks: '-*,modernize-*,performance-*,bugprone-*'
+WarningsAsErrors: ''
+HeaderFilterRegex: '^(PubgExt|Include)/.*'
+FormatStyle: file

@@ -1,0 +1,13 @@
+{
+  "name": "pubgext",
+  "version-string": "0.1.0",
+  "description": "RuntimeBroker build dependencies. The repository includes a vendored nlohmann/json header; ImGui integration will use a submodule or FetchContent in the future.",
+  "features": {
+    "vcpkg-json": {
+      "description": "Use nlohmann-json from vcpkg instead of the vendored header.",
+      "dependencies": [
+        "nlohmann-json"
+      ]
+    }
+  }
+}
