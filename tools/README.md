@@ -46,3 +46,6 @@ tools\kdmapper.exe ReadWriteDriver\ReadWriteDriver\x64\Release\ReadWriteDriver.s
 Requer o modo de testes de assinatura desabilitado e execução como
 administrador. O binário tem aproximadamente 154 KB e permanece ignorado pelo
 Git.
+
+Para preparar uma VM isolada, configurar test signing e executar o carregamento
+com segurança, consulte o [guia de Teste Seguro do Driver](../docs/testing.md).

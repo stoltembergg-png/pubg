@@ -32,6 +32,122 @@ jobs:
       - name: Configure CMake
         run: cmake -B build -S .
 
+  # Static-only compatibility verification. This job never loads a kernel
+  # driver; real load testing requires a self-hosted runner with a VM snapshot
+  # and must not be performed on a GitHub-hosted runner.
+  verify-driver-compat:
+    if: always()
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build PubgExt for compatibility checks
+        run: msbuild PubgExt.sln /p:Configuration=Release /p:Platform=x64
+
+      - name: Check generated offsets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path -LiteralPath 'tools\dump_offsets.py') {
+            python tools\dump_offsets.py --input PubgExt\offsetdump.txt --output PubgExt\Config\Offsets.h --check
+          } else {
+            Write-Host 'tools\dump_offsets.py not present; skipping offset check.'
+          }
+
+      - name: Static ReadWriteDriver compatibility checks
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $driverRoot = Join-Path $PWD 'ReadWriteDriver'
+          if (-not (Test-Path -LiteralPath $driverRoot)) {
+            Write-Warning 'ReadWriteDriver source tree not present; skipping static checks.'
+            exit 0
+          }
+
+          $sourceFiles = @(Get-ChildItem -LiteralPath $driverRoot -Recurse -File -Include '*.c', '*.h')
+          $sourceText = (($sourceFiles | ForEach-Object {
+            Get-Content -LiteralPath $_.FullName -Raw
+          }) -join "`n")
+
+          # Kernel imports must go through the resolver used by the mapper.
+          if ($sourceText -notmatch '\bMmGetSystemRoutineAddress\b') {
+            throw 'ReadWriteDriver has no resolvable kernel-import path (MmGetSystemRoutineAddress).'
+          }
+          if ($sourceText -notmatch 'MmGetSystemRoutineAddress\s*\(') {
+            throw 'ReadWriteDriver does not call MmGetSystemRoutineAddress to resolve imports.'
+          }
+          Write-Host 'Kernel import resolver found: MmGetSystemRoutineAddress.'
+
+          $mapperSource = Join-Path $driverRoot 'ReadWriteDriverMapper\driver.c'
+          if (Test-Path -LiteralPath $mapperSource) {
+            $mapperText = Get-Content -LiteralPath $mapperSource -Raw
+            $importThunkWrites = @([regex]::Matches($mapperText, 'pAddrThunk->u1\.Function\s*=\s*\(UINT_PTR\)lpFunction'))
+            $resolverCalls = @([regex]::Matches($mapperText, 'lpFunction\s*=\s*MmGetSystemRoutineAddress\s*\('))
+            if ($importThunkWrites.Count -gt 0 -and $resolverCalls.Count -eq 0) {
+              throw 'Mapper writes import thunks without a resolvable kernel-import call.'
+            }
+            $importAssignments = @([regex]::Matches($mapperText, '(?m)^[ \t]*lpFunction[ \t]*=[ \t]*(?<value>\S[^;\r\n]*)'))
+            foreach ($assignment in $importAssignments) {
+              $value = $assignment.Groups['value'].Value.Trim()
+              if ($value -notmatch '^(?:NULL|MmGetSystemRoutineAddress)\b') {
+                throw ("Mapper contains an import assignment that bypasses MmGetSystemRoutineAddress: {0}" -f $value)
+              }
+            }
+            Write-Host ("Import thunk resolution path verified ({0} resolver call(s))." -f $resolverCalls.Count)
+          }
+
+          # These legacy mapper addresses are intentionally diagnostic only:
+          # report them without failing this static, non-loading job.
+          $hardcoded = @($sourceFiles | Select-String -Pattern '(?i)\b(?:p)?Mm(?:AllocateIndependentPages|SetPageProtection)\b[^;\r\n]*\+\s*0x[0-9a-f]+')
+          foreach ($match in $hardcoded) {
+            Write-Warning ("Hardcoded kernel import address (review only): {0}:{1}: {2}" -f $match.Filename, $match.LineNumber, $match.Line.Trim())
+          }
+          if ($hardcoded.Count -eq 0) {
+            Write-Host 'No hardcoded MmAllocateIndependentPages/MmSetPageProtection address found.'
+          }
+
+          $driverSource = Join-Path $driverRoot 'ReadWriteDriver\driver.c'
+          if (-not (Test-Path -LiteralPath $driverSource)) {
+            throw 'ReadWriteDriver\driver.c is missing; cannot verify the win32kbase offset table.'
+          }
+          $driverText = Get-Content -LiteralPath $driverSource -Raw
+          $offsetTable = [regex]::Match($driverText, '(?s)Win32kOffsets\s*\[\]\s*=\s*\{(?<entries>.*?)\};')
+          if (-not $offsetTable.Success) {
+            throw 'win32kbase offset table (Win32kOffsets) was not found.'
+          }
+          if ($driverText -notmatch 'GetPIDByName\(\s*"win32kbase\.sys"\s*\)') {
+            throw 'ReadWriteDriver does not identify win32kbase.sys before applying its offset.'
+          }
+          if ($offsetTable.Groups['entries'].Value -notmatch '\{\s*[^,]+,\s*0x[0-9A-Fa-f]+\s*\}') {
+            throw 'win32kbase offset table has no hexadecimal offset entry.'
+          }
+          if ($driverText -notmatch '\bWin32FreePoolOffset\b' -or $driverText -notmatch '\bGetWin32FreePoolOffset\b') {
+            throw 'win32kbase offset table is not connected to the offset lookup.'
+          }
+          Write-Host 'win32kbase offset table found and connected to GetWin32FreePoolOffset.'
+
+      - name: Optional static analysis
+        id: static-analysis
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $clangTidy = Get-Command clang-tidy -ErrorAction SilentlyContinue
+          if ($clangTidy) {
+            Write-Host 'clang-tidy found; running a non-loading static analysis pass.'
+            & $clangTidy.Source --version
+            # The WDK driver is not loaded or executed here. Analyze only when
+            # clang-tidy is available; its diagnostics are intentionally advisory.
+            & $clangTidy.Source --quiet ReadWriteDriver\ReadWriteDriver\driver.c -- -x c
+          } else {
+            Write-Host 'clang-tidy unavailable; trying MSBuild code analysis.'
+            msbuild PubgExt.sln /p:Configuration=Release /p:Platform=x64 /p:RunCodeAnalysis=true
+          }
+
   # Opcional: requer o WDK instalado no runner. Falhas não bloqueiam o CI.
   build-driver:
     runs-on: windows-latest

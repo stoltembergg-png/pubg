@@ -141,6 +141,13 @@ O workflow `.github/workflows/build.yml` executa o build da solução
 projeto com `cmake -B build -S .`. Ele é executado em pushes e pull requests
 direcionados às branches `main` ou `master`.
 
+## Testes
+
+O carregamento e a validação do driver devem ocorrer somente em uma VM isolada
+e restaurável. Consulte o [guia de Teste Seguro do Driver](testing.md) para o
+procedimento com Hyper-V, DbgView, Driver Verifier e o fluxo alternativo de
+self-hosted runner.
+
 ## Como manter atualizado
 
 Ao alterar o SDK ou atualizar a versão do jogo, revise os offsets e regenere o

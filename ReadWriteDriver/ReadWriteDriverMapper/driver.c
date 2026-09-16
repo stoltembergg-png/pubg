@@ -139,10 +139,13 @@ void FixRelocations(LPVOID destination, PIMAGE_NT_HEADERS pNTHeader)
 	}
 }
 
-void ManualMap()
+NTSTATUS ManualMap()
 {
-	uintptr_t ntoskrnl_imagebase;
-	RtlPcToFileHeader(&RtlPcToFileHeader, &ntoskrnl_imagebase);
+	PVOID ntoskrnl_base = NULL;
+	if (!RtlPcToFileHeader((PVOID)&RtlPcToFileHeader, &ntoskrnl_base) || !ntoskrnl_base)
+		return STATUS_NOT_FOUND;
+
+	uintptr_t ntoskrnl_imagebase = (uintptr_t)ntoskrnl_base;
 
 	PIMAGE_DOS_HEADER pDOSHeader = (PIMAGE_DOS_HEADER)&hexData;
 	PIMAGE_NT_HEADERS pNTHeader = (PIMAGE_NT_HEADERS)((PBYTE)&hexData + pDOSHeader->e_lfanew);
@@ -151,14 +154,24 @@ void ManualMap()
 #endif
 	uintptr_t pMmAllocateIndependentPages = ntoskrnl_imagebase + 0x809420; // ntoskrnl!MmAllocateIndependentPages
 	MmAllocateIndependentPages = (MmAllocateIndependentPages_t)(pMmAllocateIndependentPages);
+	if (!MmAllocateIndependentPages)
+		return STATUS_NOT_SUPPORTED;
+
 	allocated_memory = MmAllocateIndependentPages(pNTHeader->OptionalHeader.SizeOfImage, -1);
+	if (!allocated_memory)
+		return STATUS_INSUFFICIENT_RESOURCES;
 #ifdef _DEBUG
 	DbgPrintEx(DPFLTR_IHVDRIVER_ID, -1, "Allocated at 0x%p\r\n", allocated_memory);
 #endif
 
 	uintptr_t pMmSetPageProtection = ntoskrnl_imagebase + 0x3B3B60; // ntoskrnl!MmSetPageProtection
 	MmSetPageProtection = (MmSetPageProtection_t)(pMmSetPageProtection);
+	if (!MmSetPageProtection)
+		return STATUS_NOT_SUPPORTED;
+
 	BOOLEAN result = MmSetPageProtection(allocated_memory, pNTHeader->OptionalHeader.SizeOfImage, PAGE_EXECUTE_READWRITE);
+	if (!result)
+		return STATUS_UNSUCCESSFUL;
 	
 	CopyHeadersAndSections(&hexData, allocated_memory, pNTHeader);
 	FixIAT(allocated_memory, pNTHeader);
@@ -166,6 +179,7 @@ void ManualMap()
 
 	LPVOID dwEntryPoint = (PBYTE)allocated_memory + pNTHeader->OptionalHeader.AddressOfEntryPoint;
 	((void(__fastcall*)(DWORD32))dwEntryPoint)(usermode_module_pid);
+	return STATUS_SUCCESS;
 }
 
 void DriverUnload(PDRIVER_OBJECT pDriverObject)
@@ -198,7 +212,9 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT  DriverObject, _In_ PUNICODE_STRING Reg
 	DbgPrintEx(DPFLTR_IHVDRIVER_ID, -1, "Path %wZ\n", *RegistryPath);
 #endif
 
-	ManualMap();
+	NTSTATUS mapStatus = ManualMap();
+	if (!NT_SUCCESS(mapStatus))
+		return mapStatus;
 #ifdef _DEBUG
 	DbgPrintEx(DPFLTR_IHVDRIVER_ID, -1, "Manual map done\n");
 #endif

@@ -2,7 +2,7 @@
 
 NTSTATUS WritePhysicalAddress(PVOID TargetAddress, PVOID lpBuffer, SIZE_T Size, SIZE_T* BytesWritten);
 uint64_t TranslateLinearAddress(uint64_t directoryTableBase, uint64_t virtualAddress);
-ReadPhysicalAddress(paddress, buffer, size, read);
+NTSTATUS ReadPhysicalAddress(PVOID TargetAddress, PVOID lpBuffer, SIZE_T Size, SIZE_T* BytesRead);
 
 NTKERNELAPI
 PVOID
@@ -29,13 +29,24 @@ PVOID GetProcessBaseAddress(int pid)
 #define WINDOWS_1903 18362
 #define WINDOWS_1909 18363
 #define WINDOWS_2004 19041
-#define WINDOWS_20H2 19569
-#define WINDOWS_21H1 20180
+#define WINDOWS_20H2 19042
+#define WINDOWS_21H1 19043
+#define WINDOWS_11_22H2 22621
+#define WINDOWS_11_23H2 22631
 
 unsigned long GetUserDirectoryTableBaseOffset()
 {
 	RTL_OSVERSIONINFOW ver = { 0 };
-	RtlGetVersion(&ver);
+	NTSTATUS status;
+
+	ver.dwOSVersionInfoSize = sizeof(ver);
+	status = RtlGetVersion(&ver);
+	if (!NT_SUCCESS(status))
+	{
+		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+			"ReadWriteDriver: RtlGetVersion failed: 0x%08X\r\n", status);
+		return 0;
+	}
 
 	switch (ver.dwBuildNumber)
 	{
@@ -60,19 +71,35 @@ unsigned long GetUserDirectoryTableBaseOffset()
 	case WINDOWS_21H1:
 		return 0x0388;
 		break;
+	case WINDOWS_11_22H2:
+		return 0x03A0;
+		break;
+	case WINDOWS_11_23H2:
+		return 0x03A8;
+		break;
 	default:
-		return 0x0388;
+		// TODO: PDB_OFFSETS - add the UserDirectoryTableBase offset for new builds.
+		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+			"ReadWriteDriver: unsupported build %lu; refusing DirectoryTableBase fallback\r\n",
+			ver.dwBuildNumber);
+		return 0;
 	}
 }
 
 //check normal dirbase if 0 then get from UserDirectoryTableBas
 ULONG_PTR GetProcessCr3(PEPROCESS pProcess)
 {
+	if (!pProcess)
+		return 0;
+
 	PUCHAR process = (PUCHAR)pProcess;
 	ULONG_PTR process_dirbase = *(PULONG_PTR)(process + 0x28); //dirbase x64, 32bit is 0x18
 	if (process_dirbase == 0)
 	{
 		unsigned long UserDirOffset = GetUserDirectoryTableBaseOffset();
+		if (UserDirOffset == 0)
+			return 0;
+
 		ULONG_PTR process_userdirbase = *(PULONG_PTR)(process + UserDirOffset);
 		return process_userdirbase;
 	}
@@ -100,16 +127,30 @@ NTSTATUS WriteVirtual(uint64_t dirbase, uint64_t address, uint8_t* buffer, SIZE_
 
 NTSTATUS ReadPhysicalAddress(PVOID TargetAddress, PVOID lpBuffer, SIZE_T Size, SIZE_T* BytesRead)
 {
+	if (!TargetAddress || !lpBuffer || !BytesRead || Size == 0)
+		return STATUS_INVALID_PARAMETER;
+
+	*BytesRead = 0;
 	MM_COPY_ADDRESS AddrToRead = { 0 };
 	AddrToRead.PhysicalAddress.QuadPart = TargetAddress;
-	return MmCopyMemory(lpBuffer, AddrToRead, Size, MM_COPY_MEMORY_PHYSICAL, BytesRead);
+
+	NTSTATUS status = MmCopyMemory(lpBuffer, AddrToRead, Size, MM_COPY_MEMORY_PHYSICAL, BytesRead);
+	if (!NT_SUCCESS(status))
+		return status;
+
+	if (*BytesRead != Size)
+		return STATUS_PARTIAL_COPY;
+
+	return STATUS_SUCCESS;
 }
 
 //MmMapIoSpaceEx limit is page 4096 byte
 NTSTATUS WritePhysicalAddress(PVOID TargetAddress, PVOID lpBuffer, SIZE_T Size, SIZE_T* BytesWritten)
 {
-	if (!TargetAddress)
-		return STATUS_UNSUCCESSFUL;
+	if (!TargetAddress || !lpBuffer || !BytesWritten || Size == 0)
+		return STATUS_INVALID_PARAMETER;
+
+	*BytesWritten = 0;
 
 	PHYSICAL_ADDRESS AddrToWrite = { 0 };
 	AddrToWrite.QuadPart = TargetAddress;
@@ -117,7 +158,7 @@ NTSTATUS WritePhysicalAddress(PVOID TargetAddress, PVOID lpBuffer, SIZE_T Size, 
 	PVOID pmapped_mem = MmMapIoSpaceEx(AddrToWrite, Size, PAGE_READWRITE);
 
 	if (!pmapped_mem)
-		return STATUS_UNSUCCESSFUL;
+		return STATUS_INSUFFICIENT_RESOURCES;
 
 	memcpy(pmapped_mem, lpBuffer, Size);
 
@@ -140,12 +181,14 @@ uint64_t TranslateLinearAddress(uint64_t directoryTableBase, uint64_t virtualAdd
 
 	SIZE_T readsize = 0;
 	uint64_t pdpe = 0;
-	ReadPhysicalAddress(directoryTableBase + 8 * pdp, &pdpe, sizeof(pdpe), &readsize);
+	if (!NT_SUCCESS(ReadPhysicalAddress(directoryTableBase + 8 * pdp, &pdpe, sizeof(pdpe), &readsize)) || readsize != sizeof(pdpe))
+		return 0;
 	if (~pdpe & 1)
 		return 0;
 
 	uint64_t pde = 0;
-	ReadPhysicalAddress((pdpe & PMASK) + 8 * pd, &pde, sizeof(pde), &readsize);
+	if (!NT_SUCCESS(ReadPhysicalAddress((pdpe & PMASK) + 8 * pd, &pde, sizeof(pde), &readsize)) || readsize != sizeof(pde))
+		return 0;
 	if (~pde & 1)
 		return 0;
 
@@ -154,7 +197,8 @@ uint64_t TranslateLinearAddress(uint64_t directoryTableBase, uint64_t virtualAdd
 		return (pde & (~0ull << 42 >> 12)) + (virtualAddress & ~(~0ull << 30));
 
 	uint64_t pteAddr = 0;
-	ReadPhysicalAddress((pde & PMASK) + 8 * pt, &pteAddr, sizeof(pteAddr), &readsize);
+	if (!NT_SUCCESS(ReadPhysicalAddress((pde & PMASK) + 8 * pt, &pteAddr, sizeof(pteAddr), &readsize)) || readsize != sizeof(pteAddr))
+		return 0;
 	if (~pteAddr & 1)
 		return 0;
 
@@ -163,7 +207,8 @@ uint64_t TranslateLinearAddress(uint64_t directoryTableBase, uint64_t virtualAdd
 		return (pteAddr & PMASK) + (virtualAddress & ~(~0ull << 21));
 
 	virtualAddress = 0;
-	ReadPhysicalAddress((pteAddr & PMASK) + 8 * pte, &virtualAddress, sizeof(virtualAddress), &readsize);
+	if (!NT_SUCCESS(ReadPhysicalAddress((pteAddr & PMASK) + 8 * pte, &virtualAddress, sizeof(virtualAddress), &readsize)) || readsize != sizeof(virtualAddress))
+		return 0;
 	virtualAddress &= PMASK;
 
 	if (!virtualAddress)
@@ -177,7 +222,8 @@ uint64_t TranslateLinearAddress(uint64_t directoryTableBase, uint64_t virtualAdd
 NTSTATUS ReadProcessMemory(int pid, PVOID Address, PVOID AllocatedBuffer, SIZE_T size, SIZE_T* read)
 {
 	PEPROCESS pProcess = NULL;
-	if (pid == 0) return STATUS_UNSUCCESSFUL;
+	if (pid == 0 || !Address || !AllocatedBuffer || !read || size == 0) return STATUS_INVALID_PARAMETER;
+	*read = 0;
 
 	NTSTATUS NtRet = PsLookupProcessByProcessId(pid, &pProcess);
 	if (NtRet != STATUS_SUCCESS) return NtRet;
@@ -209,7 +255,8 @@ NTSTATUS ReadProcessMemory(int pid, PVOID Address, PVOID AllocatedBuffer, SIZE_T
 NTSTATUS WriteProcessMemory(int pid, PVOID Address, PVOID AllocatedBuffer, SIZE_T size, SIZE_T* written)
 {
 	PEPROCESS pProcess = NULL;
-	if (pid == 0) return STATUS_UNSUCCESSFUL;
+	if (pid == 0 || !Address || !AllocatedBuffer || !written || size == 0) return STATUS_INVALID_PARAMETER;
+	*written = 0;
 
 	NTSTATUS NtRet = PsLookupProcessByProcessId(pid, &pProcess);
 	if (NtRet != STATUS_SUCCESS) return NtRet;
