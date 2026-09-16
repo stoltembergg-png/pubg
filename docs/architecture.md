@@ -83,6 +83,17 @@ localiza `win32kbase.sys` e usa o endereço global em
 hook. O hook interpreta a `Command`, executa a operação e restaura o fluxo
 normal da função original.
 
+### Caminhos alternativos de carga
+
+`tools/kdmapper.exe` é uma opção externa de manual mapping para carregar o
+`ReadWriteDriver.sys` sem compilar ou usar o `ReadWriteDriverMapper.sys`
+interno. O mapper interno faz parte da arquitetura documentada e do fluxo
+oficial do projeto, enquanto o `kdmapper.exe` é um utilitário genérico mantido
+fora desse fluxo. A alternativa externa pode ser mais rápida para testes e
+quando o mapper não estiver disponível, mas exige execução como administrador,
+o modo de testes de assinatura desabilitado e não oferece a mesma integração,
+controle de versão ou previsibilidade do mapper interno.
+
 ### Command IDs
 
 `PubgExt/driver/common.h` compartilha o layout binário da estrutura com o

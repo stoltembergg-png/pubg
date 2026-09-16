@@ -45,6 +45,10 @@ msbuild ReadWriteDriver/ReadWriteKernel.sln /p:Configuration=Release /p:Platform
 WDK deve estar instalado para que os projetos de kernel sejam reconhecidos e
 compilados. As duas solutions têm configurações e artefatos independentes.
 
+Como alternativa rápida para carregar um `.sys`, use o utilitário externo
+`tools/kdmapper.exe`. Ele não substitui o fluxo oficial do projeto e requer
+ambiente de testes configurado e privilégios de administrador.
+
 ## Estrutura de pastas
 
 - `PubgExt/`: código principal da aplicação;

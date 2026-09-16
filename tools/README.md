@@ -29,3 +29,20 @@ python tools/dump_offsets.py --input PubgExt/offsetdump.txt --output PubgExt/Con
 Os dumps do SDK, incluindo `2609.1.1.93/`, são gerados localmente e estão
 ignorados pelo Git. Mantenha esse diretório apenas na cópia de trabalho e use
 seus arquivos como entrada do gerador; não versione os dumps no repositório.
+
+## kdmapper.exe
+
+`kdmapper.exe` é um utilitário genérico de manual mapping e pode ser usado como
+alternativa ao `ReadWriteDriverMapper.sys` quando não se quer compilar o
+mapper. Ele não faz parte do fluxo oficial `PubgExt` → `ReadWriteDriver` e é
+mantido como uma opção externa.
+
+Exemplo de uso:
+
+```text
+tools\kdmapper.exe ReadWriteDriver\ReadWriteDriver\x64\Release\ReadWriteDriver.sys
+```
+
+Requer o modo de testes de assinatura desabilitado e execução como
+administrador. O binário tem aproximadamente 154 KB e permanece ignorado pelo
+Git.
