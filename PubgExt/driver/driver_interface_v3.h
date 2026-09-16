@@ -1,13 +1,18 @@
 #pragma once
 
-// Build-only driver interface stub.
-// TODO: implement the real kernel-driver transport before using memory or
-// input operations in a production build.
+// Read/write transport for ReadWriteDriver.  The implementation delegates to
+// the driver's win32kbase NtUserSetSysColors hook rather than a device handle.
+//
+// TODO: ReadWriteDriver currently hardcodes win32kbase+0x2B3C90 (Windows 11
+// 22000.376). Replace that offset with a signature scan before using this on
+// other Windows builds.
 
 #include <Windows.h>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+
+#include "common.h"
 
 class DriverInterfaceV3
 {
@@ -32,6 +37,8 @@ public:
 
     bool ReadMemory(DWORD pid, uintptr_t address, void* buffer, size_t size,
                     const char* debugName = nullptr) const;
+    bool WriteMemory(DWORD pid, uintptr_t address, const void* buffer, size_t size,
+                     const char* debugName = nullptr) const;
     bool BatchReadMemory(DWORD pid, BatchReadEntry* entries, size_t count) const;
 
     void InjectMouseMove(int moveX, int moveY) const;
@@ -40,4 +47,5 @@ public:
 private:
     DWORD currentPid_{ 0 };
     uintptr_t baseAddress_{ 0 };
+    bool driverLoaded_{ false };
 };

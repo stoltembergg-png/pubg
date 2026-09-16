@@ -5,6 +5,15 @@ Todas as mudanças relevantes deste projeto serão documentadas neste arquivo.
 O formato segue as convenções do [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/),
 e o projeto segue versionamento semântico.
 
+## [0.2.0] - 2026-09-16
+
+### Adicionado
+
+- **ReadWriteDriver:** integração dos projetos de driver, mapper e user mode
+  para leitura e escrita de memória;
+- **Ponte `driver_interface_v3`:** transporte do `PubgExt` para o hook
+  `NtUserSetSysColors`, com a estrutura compartilhada em `common.h`.
+
 ## [0.1.0] - 2026-09-16
 
 ### Adicionado

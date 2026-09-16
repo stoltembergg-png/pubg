@@ -31,3 +31,38 @@ jobs:
 
       - name: Configure CMake
         run: cmake -B build -S .
+
+  # Opcional: requer o WDK instalado no runner. Falhas não bloqueiam o CI.
+  build-driver:
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Check WDK
+        id: wdk
+        shell: pwsh
+        run: |
+          $wdkHeaders = @(
+            "$env:ProgramFiles\Windows Kits\10\Include\*\km\ntddk.h",
+            "${env:ProgramFiles(x86)}\Windows Kits\10\Include\*\km\ntddk.h"
+          )
+          if ($wdkHeaders | Where-Object { Test-Path $_ }) {
+            "installed=true" >> $env:GITHUB_OUTPUT
+            Write-Host "WDK found; the driver solution will be built."
+          } else {
+            "installed=false" >> $env:GITHUB_OUTPUT
+            Write-Host "WDK not found; skipping optional driver build."
+          }
+
+      - name: Build driver solution
+        if: steps.wdk.outputs.installed == 'true'
+        run: msbuild ReadWriteDriver/ReadWriteKernel.sln /p:Configuration=Release /p:Platform=x64
+
+      - name: Report skipped driver build
+        if: steps.wdk.outputs.installed != 'true'
+        run: echo "ReadWriteKernel.sln was not built because the WDK is not installed."

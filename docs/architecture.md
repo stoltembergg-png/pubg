@@ -63,6 +63,52 @@ Driver/Memory -> Engine -> Actors -> SharedState -> ESP -> Radar
 Na prática, ESP e Radar são renderizados no frame, enquanto o Aimbot é
 acionado após a publicação de uma atualização pelo `MemoryLoop`.
 
+## ReadWriteDriver - Arquitetura Kernel
+
+O transporte de memória usado pelo `PubgExt` é implementado em
+`PubgExt/driver/driver_interface_v3.*`. Ele não usa um device handle: a ponte
+em user mode resolve `NtUserSetSysColors` em `win32u.dll` e envia a estrutura
+`Command` pelo caminho da função hookeada.
+
+O fluxo de carregamento e execução é:
+
+```text
+PubgExt (UM) -> driver_interface_v3 -> NtUserSetSysColors -> ReadWriteDriver.sys
+```
+
+O mapper carrega `ReadWriteDriverMapper.sys`, que reserva páginas não paginadas
+e mapeia manualmente `ReadWriteDriver.sys`. Durante a inicialização, o driver
+localiza `win32kbase.sys` e usa o endereço global em
+`win32kbase.sys + 0x2B3C90` (associado a `NtUserSetSysColors`) para instalar o
+hook. O hook interpreta a `Command`, executa a operação e restaura o fluxo
+normal da função original.
+
+### Command IDs
+
+`PubgExt/driver/common.h` compartilha o layout binário da estrutura com o
+driver; a ordem dos campos e os ponteiros de 64 bits precisam permanecer
+idênticos. Os comandos são:
+
+- `COMMAND_READWRITE` (`0xB16B00B5`): lê ou escreve memória, conforme `rw`;
+- `COMMAND_GETPROCPID` (`0xBADA55`): obtém informações do processo alvo;
+- `COMMAND_ISLOADED` (`0x69420`): identifica o estado de carregamento.
+
+As leituras e escritas usam `physmem`: o driver obtém o CR3 do processo, traduz
+endereços virtuais para físicos e acessa a memória física em blocos de página.
+Isso mantém o caminho de memória separado da camada de renderização e é
+encapsulado pela interface `DriverInterfaceV3`.
+
+### Limitações e requisitos
+
+- O deslocamento `win32kbase+0x2B3C90` é hardcoded para Windows 11 build
+  `22000.376`; outras versões exigem atualização ou um signature scanner.
+- O carregamento de driver exige um ambiente de testes com **test signing**
+  habilitado e privilégios apropriados.
+- **Secure Boot** pode impedir o carregamento de imagens não assinadas; ele
+  precisa ser considerado ao preparar o ambiente de teste.
+- O driver e o `PubgExt` são soluções independentes e devem ser compilados e
+  validados separadamente.
+
 ## Configurações
 
 Os modelos de configuração ficam em `PubgExt/Config/`, com as instâncias

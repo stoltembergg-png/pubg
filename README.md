@@ -16,6 +16,8 @@ driver.
 
 - Visual Studio 2022 com o workload **Desenvolvimento para Desktop com C++**;
 - Windows 10 SDK 10.0 instalado pelo Visual Studio Installer;
+- Windows Driver Kit (WDK) correspondente ao Windows SDK, para compilar o
+  driver;
 - Driver de kernel compatível, carregado e configurado para o ambiente de teste;
 - Discord instalado e com o overlay habilitado, caso o renderizador do Discord
   seja utilizado.
@@ -28,6 +30,20 @@ driver.
 
 O carregamento do driver e a execução do binário devem ser feitos somente em
 um ambiente autorizado e compatível com a configuração usada no build.
+
+## Driver
+
+O driver possui uma solução própria com três projetos (`ReadWriteDriver`,
+`ReadWriteDriverMapper` e `ReadWriteUser`). Compile-a separadamente da aplicação
+principal:
+
+```text
+msbuild ReadWriteDriver/ReadWriteKernel.sln /p:Configuration=Release /p:Platform=x64
+```
+
+`ReadWriteKernel.sln` não faz parte do CMake nem da solução `PubgExt.sln`; o
+WDK deve estar instalado para que os projetos de kernel sejam reconhecidos e
+compilados. As duas solutions têm configurações e artefatos independentes.
 
 ## Estrutura de pastas
 
