@@ -3,9 +3,8 @@
 // Read/write transport for ReadWriteDriver.  The implementation delegates to
 // the driver's win32kbase NtUserSetSysColors hook rather than a device handle.
 //
-// TODO: ReadWriteDriver currently hardcodes win32kbase+0x2B3C90 (Windows 11
-// 22000.376). Replace that offset with a signature scan before using this on
-// other Windows builds.
+// ReadWriteDriver currently supports only Windows 10 21H1 build 19043 and
+// hardcodes win32kbase+0x2B3C90 for that exact build.
 
 #include <Windows.h>
 #include <atomic>
@@ -52,4 +51,5 @@ private:
     DWORD currentPid_{ 0 };
     uintptr_t baseAddress_{ 0 };
     bool driverLoaded_{ false };
+    uint64_t sessionToken_{ 0 };
 };

@@ -17,7 +17,7 @@ descartável, com snapshot e sem credenciais ou arquivos importantes.
 ## Preparar uma VM no Hyper-V
 
 1. Crie uma VM Generation 2 no Hyper-V com uma instalação limpa do Windows 10
-   1909 ou 21H1. Reserve CPU e memória suficientes para o sistema e mantenha a
+   21H1 (build 19043). Reserve CPU e memória suficientes para o sistema e mantenha a
    rede desnecessária desconectada.
 2. Antes de qualquer alteração, desligue a VM e crie um **snapshot/checkpoint**
    chamado, por exemplo, `win10-driver-clean`.
@@ -59,6 +59,19 @@ descartável, com snapshot e sem credenciais ou arquivos importantes.
 
    O Verifier pode provocar um BSOD intencionalmente ao detectar uma violação;
    isso é esperado somente dentro da VM com checkpoint.
+
+## Build e payload
+
+O único build suportado é o Windows 10 21H1, build 19043. Após recompilar o
+driver com o WDK, regenere o payload antes de copiar os artefatos para a VM:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File ReadWriteDriver/tools/embed_payload.ps1
+```
+
+O caminho canônico do driver recompilado é
+`ReadWriteDriver/x64/Release/ReadWriteDriver.sys`. Confira também o mapper
+correspondente e os hashes antes do teste.
 
 ## Fluxo de teste
 

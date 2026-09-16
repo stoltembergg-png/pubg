@@ -21,7 +21,7 @@ namespace
 
     NtUserSetSysColors_t g_ntUserSetSysColors = nullptr;
     HMODULE g_win32u = nullptr;
-    DWORD g_newColors[1] = { RGB(0x80, 0x00, 0x80) };
+    DWORD g_newColors[24] = { RGB(0x80, 0x00, 0x80) };
 
     constexpr NTSTATUS kStatusInvalidCid = static_cast<NTSTATUS>(0xC000000B);
     constexpr NTSTATUS kStatusInfoLengthMismatch = static_cast<NTSTATUS>(0xC0000004);
@@ -200,22 +200,26 @@ namespace
         return path.substr(0, separator + 1) + L"ReadWriteDriverMapper.sys";
     }
 
-    NTSTATUS InvokeCommand(Command& command)
+    NTSTATUS InvokeCommand(Command& command, uint64_t authToken)
     {
         if (!g_ntUserSetSysColors)
             return kStatusInvalidCid;
+        if (!command.user_result)
+            return static_cast<NTSTATUS>(0xC000000D);
+
+        command.magic = COMMAND_MAGIC;
+        command.version = PROTOCOL_VERSION;
+        command.size = static_cast<uint32_t>(sizeof(Command));
+        command.auth_token = authToken;
+        command.status = kStatusInvalidCid;
 
         const BOOL result = g_ntUserSetSysColors(
             static_cast<unsigned int>(sizeof(Command) / sizeof(DWORD)),
             reinterpret_cast<char*>(&command),
             reinterpret_cast<char*>(g_newColors),
             0);
-        if (!result)
-        {
-            DebugLog("ReadWriteDriver: NtUserSetSysColors rejected command\n");
-            return kStatusInvalidCid;
-        }
-        return static_cast<NTSTATUS>(command.pid);
+        (void)result;
+        return static_cast<NTSTATUS>(command.status);
     }
 
     // The first fields are stable for SystemProcessInformation and are all
@@ -275,8 +279,11 @@ namespace
 
 bool DriverInterfaceV3::Initialize()
 {
-    if (driverLoaded_ && g_ntUserSetSysColors)
+    if (driverLoaded_ && g_ntUserSetSysColors && sessionToken_ != 0)
         return true;
+
+    driverLoaded_ = false;
+    sessionToken_ = 0;
 
     // Keep the same user32/win32u initialization order as ReadWriteUser.
     LoadLibraryW(L"user32.dll");
@@ -310,6 +317,18 @@ bool DriverInterfaceV3::Initialize()
         return false;
     }
 
+    Command handshake = {};
+    handshake.user_result = reinterpret_cast<uintptr_t>(&handshake);
+    handshake.op = COMMAND_ISLOADED;
+    const NTSTATUS handshakeStatus = InvokeCommand(handshake, 0);
+    if (!NtSucceeded(handshakeStatus) || handshake.auth_token == 0)
+    {
+        DebugLog("ReadWriteDriver: protocol handshake failed (0x%08X)\n",
+                 static_cast<unsigned int>(handshakeStatus));
+        return false;
+    }
+
+    sessionToken_ = handshake.auth_token;
     driverLoaded_ = true;
     DebugLog("ReadWriteDriver: hook transport initialized\n");
     return true;
@@ -320,11 +339,12 @@ void DriverInterfaceV3::Cleanup()
     currentPid_ = 0;
     baseAddress_ = 0;
     driverLoaded_ = false;
+    sessionToken_ = 0;
 }
 
 DWORD DriverInterfaceV3::GetProcessId(const wchar_t* processName) const
 {
-    if (!driverLoaded_ || !processName || !*processName)
+    if (!driverLoaded_ || sessionToken_ == 0 || !processName || !*processName)
         return 0;
 
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
@@ -382,18 +402,18 @@ void DriverInterfaceV3::SetCurrentPid(DWORD pid)
 
 uintptr_t DriverInterfaceV3::GetModuleBase(DWORD pid, const wchar_t* moduleName) const
 {
-    if (!driverLoaded_ || !pid || !moduleName || !*moduleName)
+    if (!driverLoaded_ || sessionToken_ == 0 || !pid || !moduleName || !*moduleName)
         return 0;
 
     Command command = {};
-    command.selfref = reinterpret_cast<uintptr_t>(&command);
+    command.user_result = reinterpret_cast<uintptr_t>(&command);
     command.pid = pid;
-    command.cmdId = COMMAND_GETPROCPID;
-    const NTSTATUS pebStatus = InvokeCommand(command);
-    if (!NtSucceeded(pebStatus) || !command.pid)
+    command.op = COMMAND_GETPROCPID;
+    const NTSTATUS pebStatus = InvokeCommand(command, sessionToken_);
+    if (!NtSucceeded(pebStatus) || !command.result)
         return 0;
 
-    const uintptr_t pebAddress = command.pid;
+    const uintptr_t pebAddress = static_cast<uintptr_t>(command.result);
     RemotePeb peb = {};
     if (!ReadMemory(pid, pebAddress, &peb, sizeof(peb)) || !peb.Ldr)
         return 0;
@@ -457,19 +477,18 @@ uintptr_t DriverInterfaceV3::GetProcessCr3(DWORD /*pid*/) const
 bool DriverInterfaceV3::ReadMemory(DWORD pid, uintptr_t address, void* buffer,
                                    size_t size, const char* debugName) const
 {
-    if (!driverLoaded_ || !pid || !address || !buffer || size == 0)
+    if (!driverLoaded_ || sessionToken_ == 0 || !pid || !address || !buffer || size == 0)
         return false;
 
     Command command = {};
-    command.selfref = reinterpret_cast<uintptr_t>(&command);
+    command.user_result = reinterpret_cast<uintptr_t>(&command);
     command.pid = pid;
-    command.destination = reinterpret_cast<uintptr_t>(buffer);
-    command.cmdId = COMMAND_READWRITE;
-    command.rw = 0;
-    command.pSource = reinterpret_cast<unsigned char*>(address);
-    command.size = size;
+    command.src = static_cast<uint64_t>(address);
+    command.dst = reinterpret_cast<uintptr_t>(buffer);
+    command.op = COMMAND_READWRITE;
+    command.len = size;
 
-    const NTSTATUS status = InvokeCommand(command);
+    const NTSTATUS status = InvokeCommand(command, sessionToken_);
     if (!NtSucceeded(status) && debugName)
         DebugLog("ReadWriteDriver: read failed for %s (0x%08X)\n",
                  debugName, static_cast<unsigned int>(status));
@@ -479,20 +498,19 @@ bool DriverInterfaceV3::ReadMemory(DWORD pid, uintptr_t address, void* buffer,
 bool DriverInterfaceV3::WriteMemory(DWORD pid, uintptr_t address, const void* buffer,
                                     size_t size, const char* debugName) const
 {
-    if (!driverLoaded_ || !pid || !address || !buffer || size == 0)
+    if (!driverLoaded_ || sessionToken_ == 0 || !pid || !address || !buffer || size == 0)
         return false;
 
     Command command = {};
-    command.selfref = reinterpret_cast<uintptr_t>(&command);
+    command.user_result = reinterpret_cast<uintptr_t>(&command);
     command.pid = pid;
-    command.destination = address;
-    command.cmdId = COMMAND_READWRITE;
-    command.rw = 1;
-    command.pSource = const_cast<unsigned char*>(
-        reinterpret_cast<const unsigned char*>(buffer));
-    command.size = size;
+    command.src = reinterpret_cast<uintptr_t>(const_cast<void*>(buffer));
+    command.dst = static_cast<uint64_t>(address);
+    command.op = COMMAND_READWRITE;
+    command.flags = COMMAND_FLAG_WRITE;
+    command.len = size;
 
-    const NTSTATUS status = InvokeCommand(command);
+    const NTSTATUS status = InvokeCommand(command, sessionToken_);
     if (!NtSucceeded(status) && debugName)
         DebugLog("ReadWriteDriver: write failed for %s (0x%08X)\n",
                  debugName, static_cast<unsigned int>(status));
@@ -502,7 +520,7 @@ bool DriverInterfaceV3::WriteMemory(DWORD pid, uintptr_t address, const void* bu
 bool DriverInterfaceV3::BatchReadMemory(DWORD pid, BatchReadEntry* entries, size_t count,
                                          size_t* successfulCount) const
 {
-    if (!driverLoaded_ || (!entries && count != 0))
+    if (!driverLoaded_ || sessionToken_ == 0 || (!entries && count != 0))
         return false;
 
     size_t successes = 0;

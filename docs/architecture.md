@@ -94,11 +94,23 @@ quando o mapper não estiver disponível, mas exige execução como administrado
 o modo de testes de assinatura desabilitado e não oferece a mesma integração,
 controle de versão ou previsibilidade do mapper interno.
 
-### Command IDs
+### Protocolo de comandos e autenticação
 
-`PubgExt/driver/common.h` compartilha o layout binário da estrutura com o
-driver; a ordem dos campos e os ponteiros de 64 bits precisam permanecer
-idênticos. Os comandos são:
+O header canônico compartilhado é
+`PubgExt/driver/command_protocol.h`. A estrutura `Command` tem **96 bytes**;
+seu campo `status` fica no offset 88. Ela contém `magic`, `version`, `size`,
+`auth_token`, operação, PID, endereços, `user_result`, `status`, `result` e
+campos reservados. Um `static_assert` verifica o layout binário; a ordem dos
+campos e os ponteiros de 64 bits precisam permanecer idênticos entre user mode
+e kernel.
+
+A autorização é vinculada ao `PEPROCESS` retido, eliminando a tomada de uma
+sessão por reuso de PID. O token de sessão, criado por `ExUuidCreate` e
+entregue somente no handshake, é uma camada **suplementar**, não uma
+autenticação forte. A ordem de validação é: chamador → token → magic → version
+→ size.
+
+Os comandos são:
 
 - `COMMAND_READWRITE` (`0xB16B00B5`): lê ou escreve memória, conforme `rw`;
 - `COMMAND_GETPROCPID` (`0xBADA55`): obtém informações do processo alvo;
@@ -109,16 +121,45 @@ endereços virtuais para físicos e acessa a memória física em blocos de pági
 Isso mantém o caminho de memória separado da camada de renderização e é
 encapsulado pela interface `DriverInterfaceV3`.
 
-### Limitações e requisitos
+### Hardening aprovado
 
-- O deslocamento `win32kbase+0x2B3C90` é hardcoded para Windows 11 build
-  `22000.376`; outras versões exigem atualização ou um signature scanner.
+- `FixIAT` é estrito e falha quando um import não é resolvido;
+- VA de kernel é rejeitada, há limite de 16 MiB por operação, checagem de
+  overflow e rejeição de flags/reserved desconhecidos;
+- `ProbeForRead`/`ProbeForWrite` são usados somente para VA user-mode genuína;
+- o canal de retorno usa `user_result`;
+- a máscara de CR3 é `~0xFFF`;
+- as máscaras físicas foram corrigidas: PMASK usa os bits 12..51, a página de
+  2 MiB usa 21 bits mais PAT, a página de 1 GiB usa PS no PDPTE e o PTE final
+  verifica o bit Present;
+- `MmCopyMemory` nunca recebe como destino memória user-mode paginável;
+- `Win32FreePool` é chamado em todos os caminhos;
+- o gate de build ocorre antes do acesso a offsets internos do `ntoskrnl`;
+- o teardown tem dono único via CAS e o reuso chama
+  `ExReInitializeRundownProtection`;
+- o restore do slot usa `InterlockedCompareExchangePointer` com checagem de
+  dono;
+- o mapper propaga o `NTSTATUS` do payload e **não libera a imagem quando o
+  teardown falha**.
+
+### Plataforma, limitações e requisitos
+
+- A plataforma suportada é **Windows 10 21H1, build 19043, exclusivamente**.
+  Essa restrição é reforçada pelo payload e pelo gate no mapper, que retorna
+  `STATUS_NOT_SUPPORTED` em outras builds.
+- O deslocamento `win32kbase+0x2B3C90` é hardcoded para a build suportada.
 - O carregamento de driver exige um ambiente de testes com **test signing**
   habilitado e privilégios apropriados.
 - **Secure Boot** pode impedir o carregamento de imagens não assinadas; ele
   precisa ser considerado ao preparar o ambiente de teste.
 - O driver e o `PubgExt` são soluções independentes e devem ser compilados e
   validados separadamente.
+
+## Lifecycle do app (user-mode)
+
+O encerramento usa uma flag de parada atômica, uma thread joinável e shutdown
+ordenado, sem `detach`. Snapshots de `SharedData` são feitos por valor, com
+cópia profunda sob `GDataMutex`; `BaseLog` é `thread_local`.
 
 ## Configurações
 
@@ -147,6 +188,13 @@ O carregamento e a validação do driver devem ocorrer somente em uma VM isolada
 e restaurável. Consulte o [guia de Teste Seguro do Driver](testing.md) para o
 procedimento com Hyper-V, DbgView, Driver Verifier e o fluxo alternativo de
 self-hosted runner.
+
+## Riscos e limitações
+
+Consulte o documento central de riscos residuais em
+[`docs/known-issues.md`](known-issues.md). O teardown e o unload não devem ser
+considerados seguros enquanto os problemas críticos listados ali não forem
+resolvidos por redesenho arquitetural.
 
 ## Como manter atualizado
 

@@ -146,8 +146,12 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $driverPath = Join-Path $PWD 'ReadWriteDriver\ReadWriteDriver\x64\Release\ReadWriteDriver.sys'
-          if (-not (Test-Path -LiteralPath $driverPath)) {
+          $driverCandidates = @(
+            (Join-Path $PWD 'ReadWriteDriver\x64\Release\ReadWriteDriver.sys'),
+            (Join-Path $PWD 'ReadWriteDriver\ReadWriteDriver\x64\Release\ReadWriteDriver.sys')
+          )
+          $driverPath = $driverCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $driverPath) {
             Write-Host 'ReadWriteDriver.sys not found; skipping embedded payload verification.'
             exit 0
           }

@@ -24,7 +24,12 @@
 
 SharedData GSharedData;
 std::mutex GDataMutex;
-bool GIsRunning = true;
+std::atomic<bool> GIsRunning{ true };
+std::condition_variable GMemoryWake;
+std::mutex GMemoryWaitMutex;
+std::thread GMemoryThread;
+std::mutex GEngineMutex;
+std::mutex GConfigMutex;
 
 std::shared_ptr<Engine> EngineInstance;
 Radar GRadar;
@@ -44,7 +49,7 @@ std::string GLiveLogs;
 std::mutex GLiveLogsMutex;
 
 void BaseLog(const char* fmt, ...) {
-	static char buf[8192];
+	thread_local char buf[8192];
 	va_list args;
 	va_start(args, fmt);
 	vsnprintf(buf, sizeof(buf), fmt, args);
@@ -104,20 +109,33 @@ bool InitializeFeatures() {
 }
 
 void MemoryLoop() {
-	while (GIsRunning) {
-		int rate = Configs.Survivor.MemoryUpdateRate > 0 ? Configs.Survivor.MemoryUpdateRate : 144;
+	while (GIsRunning.load(std::memory_order_acquire)) {
+		int rate = 144;
+		{
+			std::lock_guard<std::mutex> configLock(GConfigMutex);
+			rate = Configs.Survivor.MemoryUpdateRate > 0 ? Configs.Survivor.MemoryUpdateRate : 144;
+		}
 		auto target = std::chrono::microseconds(1000000 / rate);
 		auto start = std::chrono::high_resolution_clock::now();
 
 		if (EngineInstance) {
 			try {
-				EngineInstance->Cache();
-				
-				if (!EngineInstance->FrameTranslateError && EngineInstance->PlayerCameraManager != 0) {
-					EngineInstance->UpdatePlayers();
-					EngineInstance->UpdateGrenades();
-					EngineInstance->RefreshViewMatrix();
+				// Keep the worker's complete configuration sample coherent with
+				// ImGui, which holds this mutex for the render frame.
+				std::lock_guard<std::mutex> configLock(GConfigMutex);
+				std::unique_lock<std::mutex> dataWorkLock(GDataMutex);
+				if (!GIsRunning.load(std::memory_order_acquire)) break;
+				{
+					std::lock_guard<std::mutex> engineLock(GEngineMutex);
+					EngineInstance->Cache();
+					
+					if (!EngineInstance->FrameTranslateError && EngineInstance->PlayerCameraManager != 0) {
+						EngineInstance->UpdatePlayers();
+						EngineInstance->UpdateGrenades();
+						EngineInstance->RefreshViewMatrix();
+					}
 				}
+				dataWorkLock.unlock();
 
 				bool dataChanged = false;
 				{
@@ -126,8 +144,30 @@ void MemoryLoop() {
 					// and publication of the actor snapshot are one synchronized operation.
 					const size_t actorCount = EngineInstance->Actors.size();
 					if (GSharedData.Actors.size() != actorCount || !EngineInstance->FrameTranslateError) {
-						GSharedData.Actors = EngineInstance->Actors;
-						GSharedData.GrenadeActors = EngineInstance->GrenadeActors;
+						GSharedData.ActorValues.clear();
+						GSharedData.Actors.clear();
+						GSharedData.ActorValues.reserve(EngineInstance->Actors.size());
+						GSharedData.Actors.reserve(EngineInstance->Actors.size());
+						for (const auto& actor : EngineInstance->Actors) {
+							if (!actor) {
+								GSharedData.Actors.push_back(nullptr);
+								continue;
+							}
+							GSharedData.ActorValues.push_back(*actor);
+							GSharedData.Actors.push_back(std::make_shared<ActorEntity>(GSharedData.ActorValues.back()));
+						}
+						GSharedData.GrenadeActorValues.clear();
+						GSharedData.GrenadeActors.clear();
+						GSharedData.GrenadeActorValues.reserve(EngineInstance->GrenadeActors.size());
+						GSharedData.GrenadeActors.reserve(EngineInstance->GrenadeActors.size());
+						for (const auto& actor : EngineInstance->GrenadeActors) {
+							if (!actor) {
+								GSharedData.GrenadeActors.push_back(nullptr);
+								continue;
+							}
+							GSharedData.GrenadeActorValues.push_back(*actor);
+							GSharedData.GrenadeActors.push_back(std::make_shared<ActorEntity>(GSharedData.GrenadeActorValues.back()));
+						}
 						GSharedData.CameraCache = EngineInstance->GetCameraCache();
 						GSharedData.UWorld = EngineInstance->UWorld;
 						GSharedData.GNames = EngineInstance->GNames;
@@ -136,6 +176,10 @@ void MemoryLoop() {
 						GSharedData.LocalCharacterPawn = EngineInstance->LocalCharacterPawn;
 						GSharedData.CameraManagerAddr = EngineInstance->PlayerCameraManager;
 						GSharedData.Recoil = Local.Recoil;
+						GSharedData.LocalTeamid = Local.Teamid;
+						GSharedData.SpectatedCount = Local.SpectatedCount;
+						GSharedData.CurrentBulletSpeed = EngineInstance->GetCurrentBulletSpeed();
+						GSharedData.CurrentGravity = EngineInstance->GetCurrentGravity();
 						GSharedData.MemoryThreadId = GetCurrentThreadId();
 						GSharedData.LastUpdateTime = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 						dataChanged = true;
@@ -143,6 +187,7 @@ void MemoryLoop() {
 				}
 
 				if (dataChanged) {
+					std::lock_guard<std::mutex> engineLock(GEngineMutex);
 					Aimbot::Tick();
 				}
 
@@ -173,7 +218,10 @@ void MemoryLoop() {
 		auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 		
 		if (elapsed < target) {
-			std::this_thread::sleep_for(target - elapsed);
+			std::unique_lock<std::mutex> waitLock(GMemoryWaitMutex);
+			GMemoryWake.wait_for(waitLock, target - elapsed, [] {
+				return !GIsRunning.load(std::memory_order_acquire);
+			});
 		}
 	}
 }
@@ -185,6 +233,8 @@ void RenderFrame() {
 		ShowMenu = !ShowMenu;
 	}
 	homeKeyWasPressed = homeKeyIsPressed;
+	std::lock_guard<std::mutex> configLock(GConfigMutex);
+	std::unique_lock<std::mutex> dataLock(GDataMutex);
 
 	if (TestMouseEnabled) {
 		bool altDown = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
@@ -210,7 +260,6 @@ void RenderFrame() {
 
 	SharedData frameData;
 	{
-		std::lock_guard<std::mutex> lock(GDataMutex);
 		frameData = GSharedData;
 	}
 
@@ -273,10 +322,10 @@ void RenderFrame() {
 				ImGui::Spacing();
 				ImGui::TextColored(ImVec4(1, 0, 1, 1), "Local Player State");
 				ImGui::BulletText("Pawn: 0x%llX", frameData.AcknowledgedPawn);
-				ImGui::BulletText("Team ID: %d", Local.Teamid);
-				ImGui::BulletText("Spectators: %d", Local.SpectatedCount);
-				ImGui::BulletText("Bullet Speed: %.1f m/s", EngineInstance->GetCurrentBulletSpeed());
-				ImGui::BulletText("Gravity: %.2f", EngineInstance->GetCurrentGravity());
+				ImGui::BulletText("Team ID: %d", frameData.LocalTeamid);
+				ImGui::BulletText("Spectators: %d", frameData.SpectatedCount);
+				ImGui::BulletText("Bullet Speed: %.1f m/s", frameData.CurrentBulletSpeed);
+				ImGui::BulletText("Gravity: %.2f", frameData.CurrentGravity);
 
 				ImGui::Spacing();
 				ImGui::TextColored(ImVec4(1, 1, 0, 1), "Camera & Projection");
@@ -304,8 +353,8 @@ void RenderFrame() {
 					oss << "UWorld: 0x" << std::hex << frameData.UWorld << "\n";
 					oss << "GNames: 0x" << frameData.GNames << "\n";
 					oss << "AcknowledgedPawn: 0x" << frameData.AcknowledgedPawn << "\n";
-					oss << "LocalTeamID: " << std::dec << Local.Teamid << "\n";
-					oss << "LocalSpectators: " << Local.SpectatedCount << "\n";
+					oss << "LocalTeamID: " << std::dec << frameData.LocalTeamid << "\n";
+					oss << "LocalSpectators: " << frameData.SpectatedCount << "\n";
 					oss << "Actors Found: " << frameData.Actors.size() << "\n";
 					oss << "Camera FOV: " << pov.FOV << "\n";
 					oss << "Camera Pos: [" << pov.Location.X << ", " << pov.Location.Y << ", " << pov.Location.Z << "]\n";
@@ -475,8 +524,8 @@ int Run() {
 		return 1;
 	}
 
-	std::thread memThread(MemoryLoop);
-	memThread.detach();
+	GIsRunning.store(true, std::memory_order_release);
+	GMemoryThread = std::thread(MemoryLoop);
 
 	// Console already hidden since we don't allocate one
 	// ShowWindow(GetConsoleWindow(), SW_HIDE);
@@ -489,7 +538,16 @@ int Run() {
 		RenderFrame();
 	});
 
-	GIsRunning = false;
+	GIsRunning.store(false, std::memory_order_release);
+	GMemoryWake.notify_all();
+	if (GMemoryThread.joinable()) {
+		GMemoryThread.join();
+	}
+	TestMouseRunning.store(false, std::memory_order_release);
+	if (TestMouseThread.joinable()) {
+		TestMouseThread.join();
+	}
+	EngineInstance.reset();
 	timeEndPeriod(1);
 	return 0;
 }

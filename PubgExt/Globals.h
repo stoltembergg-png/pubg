@@ -1,4 +1,9 @@
 #pragma once
+#include <mutex>
+
+extern std::mutex GEngineMutex;
+extern std::mutex GConfigMutex;
+
 #include "Engine.h"
 #include "Config/Offsets.h"
 

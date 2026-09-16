@@ -22,6 +22,11 @@ driver.
 - Discord instalado e com o overlay habilitado, caso o renderizador do Discord
   seja utilizado.
 
+## Plataforma suportada
+
+O suporte é exclusivo para **Windows 10 21H1, build 19043**. O payload e o
+mapper rejeitam outras builds.
+
 ## Como buildar
 
 1. Abra `PubgExt.sln` no Visual Studio 2022.
@@ -44,6 +49,15 @@ msbuild ReadWriteDriver/ReadWriteKernel.sln /p:Configuration=Release /p:Platform
 `ReadWriteKernel.sln` não faz parte do CMake nem da solução `PubgExt.sln`; o
 WDK deve estar instalado para que os projetos de kernel sejam reconhecidos e
 compilados. As duas solutions têm configurações e artefatos independentes.
+
+Os arquivos `.sys` não são versionados no repositório. É necessário compilá-los
+com o WDK e regenerar o payload após cada recompilação do driver:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File ReadWriteDriver/tools/embed_payload.ps1
+```
+
+O script usa, por padrão, `ReadWriteDriver/x64/Release/ReadWriteDriver.sys`.
 
 Como alternativa rápida para carregar um `.sys`, use o utilitário externo
 `tools/kdmapper.exe`. Ele não substitui o fluxo oficial do projeto e requer
@@ -82,3 +96,8 @@ Use este projeto somente em software, contas e ambientes para os quais você
 tenha autorização. Você é responsável por cumprir os termos de serviço, leis e
 políticas aplicáveis; não há autorização para burlar anti-cheat ou acessar
 dados de terceiros.
+
+## Riscos conhecidos
+
+Consulte [`docs/known-issues.md`](docs/known-issues.md) antes de qualquer teste
+do driver, especialmente sobre teardown e unload.

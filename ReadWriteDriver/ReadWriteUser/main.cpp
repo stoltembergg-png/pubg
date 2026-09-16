@@ -3,7 +3,30 @@
 #include "Apex.h"
 
 NtUserSetSysColors_t NtUserSetSysColors;
-DWORD aNewColors[1];
+DWORD aNewColors[24];
+static uint64_t g_session_token = 0;
+
+static NTSTATUS InvokeCommand(Command& command)
+{
+	if (!NtUserSetSysColors)
+		return STATUS_INVALID_CID;
+	if (command.op != COMMAND_ISLOADED && g_session_token == 0)
+		return STATUS_ACCESS_DENIED;
+
+	command.magic = COMMAND_MAGIC;
+	command.version = PROTOCOL_VERSION;
+	command.size = sizeof(Command);
+	command.user_result = reinterpret_cast<uintptr_t>(&command);
+	command.auth_token = command.op == COMMAND_ISLOADED ? 0 : g_session_token;
+	command.status = STATUS_INVALID_CID;
+
+	const BOOL result = NtUserSetSysColors(
+		static_cast<unsigned int>(sizeof(Command) / sizeof(DWORD)),
+		reinterpret_cast<char*>(&command), reinterpret_cast<char*>(aNewColors), 0);
+	if (!result && command.status == STATUS_INVALID_CID)
+		return STATUS_INVALID_CID;
+	return static_cast<NTSTATUS>(command.status);
+}
 
 HKEY svcRoot, svcKey;
 
@@ -97,57 +120,46 @@ BOOL SeLoadDriverPrivilege()
 
 NTSTATUS KeWriteVirtualMemory(uintptr_t pid, unsigned char* source, uintptr_t destination, SIZE_T size)
 {
-	Command cmd;
-	cmd.selfref = (uintptr_t)&cmd;
-	cmd.cmdId = COMMAND_READWRITE;
-	cmd.rw = 1;
+	Command cmd = {};
+	cmd.op = COMMAND_READWRITE;
+	cmd.flags = COMMAND_FLAG_WRITE;
 	cmd.pid = pid;
-	cmd.pSource = source;
-	cmd.destination = destination;
-	cmd.size = size;
-
-	if (!NtUserSetSysColors(sizeof(cmd) / 4, (char*)&cmd, (char*)aNewColors, 0))
-		cmd.pid = STATUS_INVALID_CID;
+	cmd.src = reinterpret_cast<uintptr_t>(source);
+	cmd.dst = destination;
+	cmd.len = size;
 
 #ifdef _DEBUG
-	printf("Status: 0x%x\n\n", cmd.pid);
+	printf("Status: 0x%x\n\n", cmd.status);
 #endif // DEBUG
 
-	return cmd.pid;
+	return InvokeCommand(cmd);
 }
 
 NTSTATUS KeReadVirtualMemory(uintptr_t pid, unsigned char* source, uintptr_t destination, SIZE_T size)
 {
-	Command cmd;
-	cmd.selfref = (uintptr_t)&cmd;
-	cmd.cmdId = COMMAND_READWRITE;
-	cmd.rw = 0;
+	Command cmd = {};
+	cmd.op = COMMAND_READWRITE;
 	cmd.pid = pid;
-	cmd.pSource = source;
-	cmd.destination = destination;
-	cmd.size = size;
-
-	if (!NtUserSetSysColors(sizeof(cmd) / 4, (char*)&cmd, (char*)aNewColors, 0))
-		cmd.pid = STATUS_INVALID_CID;
+	cmd.src = reinterpret_cast<uintptr_t>(source);
+	cmd.dst = destination;
+	cmd.len = size;
 
 #ifdef DEBUG
-	printf("Status: 0x%x\n\n", cmd.pid);
+	printf("Status: 0x%x\n\n", cmd.status);
 #endif // DEBUG
 
-	return cmd.pid;
+	return InvokeCommand(cmd);
 }
 
 uintptr_t KeGetProcessPEB(uintptr_t pid)
 {
-	Command cmd;
-	cmd.selfref = (uintptr_t)&cmd;
-	cmd.cmdId = COMMAND_GETPROCPID;
+	Command cmd = {};
+	cmd.op = COMMAND_GETPROCPID;
 	cmd.pid = pid;
 
-	if (!NtUserSetSysColors(sizeof(cmd) / 4, (char*)&cmd, (char*)aNewColors, 0))
-		cmd.pid = STATUS_INVALID_CID;
-
-	return cmd.pid;
+	if (!NT_SUCCESS(InvokeCommand(cmd)))
+		return 0;
+	return static_cast<uintptr_t>(cmd.result);
 }
 
 uintptr_t GetModuleBase(uintptr_t input_pid, uintptr_t input_peb, const wchar_t* name)
@@ -232,6 +244,16 @@ int main()
 			bg += L"\\ReadWriteDriverMapper.sys";
 
 			NTSTATUS a = LoadDriver(L"ReadWriteDriver", bg.c_str());
+			if (NT_SUCCESS(a) || a == STATUS_CONNECTION_ACTIVE)
+			{
+				Command handshake = {};
+				handshake.op = COMMAND_ISLOADED;
+				const NTSTATUS handshakeStatus = InvokeCommand(handshake);
+				if (NT_SUCCESS(handshakeStatus))
+					g_session_token = handshake.auth_token;
+				else
+					a = handshakeStatus;
+			}
 
 			RegDeleteKey(svcRoot, L"ReadWriteDriver");
 

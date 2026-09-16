@@ -2,6 +2,9 @@
 #include "ActorEntity.h"
 #include "EngineStructs.h"
 #include <unordered_map>
+#include <mutex>
+
+extern std::mutex GEngineMutex;
 class Engine
 {
 
@@ -40,8 +43,12 @@ public:
 		return val;
 	}
 
-	float GetCurrentBulletSpeed() { return CurrentBulletSpeed; }
-	float GetCurrentGravity() { return CurrentGravity; }
+	float GetCurrentBulletSpeed() {
+		return CurrentBulletSpeed;
+	}
+	float GetCurrentGravity() {
+		return CurrentGravity;
+	}
 
 	uint64_t UWorld, CurrentLevel, GameInstance, LocalPlayers, PlayerController, AcknowledgedPawn, PlayerCameraManager, GNames;
 	std::vector<std::shared_ptr<ActorEntity>> Actors;
