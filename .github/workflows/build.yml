@@ -200,6 +200,7 @@ jobs:
         uses: microsoft/setup-msbuild@v2
 
       - name: Install WDK from NuGet
+        continue-on-error: true
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -255,4 +256,6 @@ jobs:
 
       - name: Report skipped driver build
         if: steps.wdk.outputs.installed != 'true'
-        run: echo "ReadWriteKernel.sln was not built because the WDK is not installed."
+        shell: pwsh
+        run: |
+          Write-Output '::warning::ReadWriteKernel.sln was not built - the WDK / WindowsKernelModeDriver10.0 KMDF toolset is unavailable on this runner. Real driver load validation requires a self-hosted runner with a VM snapshot.'
