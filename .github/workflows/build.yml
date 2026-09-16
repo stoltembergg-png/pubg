@@ -250,7 +250,8 @@ jobs:
       - name: Warn when driver build fails
         if: failure() && steps.driver_build.outcome == 'failure'
         shell: pwsh
-        run: Write-Output '::warning::Driver build failed: it requires the WDK and the WindowsKernelModeDriver10.0 KMDF toolset; real load validation requires a self-hosted runner with a VM snapshot.'
+        run: |
+          Write-Output '::warning::Driver build failed - it requires the WDK and the WindowsKernelModeDriver10.0 KMDF toolset; real load validation requires a self-hosted runner with a VM snapshot.'
 
       - name: Report skipped driver build
         if: steps.wdk.outputs.installed != 'true'
