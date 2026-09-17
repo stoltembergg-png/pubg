@@ -163,6 +163,7 @@ if(BUILD_TESTS)
         tests/test_vector.cpp
         tests/test_camera.cpp
         tests/test_config.cpp
+        tests/test_ioctl_protocol.cpp
         PubgExt/Misc/Vector.cpp
         PubgExt/SDK/Camera.cpp
         PubgExt/Config/ConfigUtilities.cpp

@@ -195,8 +195,8 @@ int Halo()
 	InitializeHaloReachMapValues();
 
 	uintptr_t pid = GetPIDByName(L"MCC-Win64-Shipping.exe");
-	uintptr_t halo3_base = GetModuleBase(pid, KeGetProcessPEB(pid), L"halo3.dll");
-	uintptr_t haloreach_base = GetModuleBase(pid, KeGetProcessPEB(pid), L"haloreach.dll");
+	uintptr_t halo3_base = GetModuleBase(pid, L"halo3.dll");
+	uintptr_t haloreach_base = GetModuleBase(pid, L"haloreach.dll");
 	int currentMap = 0;
 	uintptr_t magicaddress;
 	uintptr_t dllbase;

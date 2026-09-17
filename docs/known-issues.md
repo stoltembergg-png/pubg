@@ -2,72 +2,70 @@
 
 ## Contexto
 
-O driver passou por 6 iterações de hardening, mas foi reprovado por 5 revisões
-independentes. O resíduo descrito abaixo exige **redesenho arquitetural**, não
-um patch incremental. Portanto, os itens permanecem bloqueadores para uso
-confiável do teardown e do unload.
+O transporte atual usa device + IOCTL e cópia virtual. Esta lista separa as
+correções concluídas nesta rodada dos pontos que ainda exigem execução em VM.
+O hot-unload permanece proibido por desenho.
 
-## Problemas abertos
+## Fechado nesta rodada
 
-### CRÍTICO — Conclusão falsa do teardown
+- O mapper agora copia os headers PE antes de resolver IAT e relocations. Antes,
+  essas rotinas consultavam diretórios no destino ainda sem headers copiados, o
+  que deixava imports e relocations sem fixup.
+- IOCTL desconhecido retorna `STATUS_INVALID_DEVICE_REQUEST`.
+- A allowlist canonicaliza caminhos nativos e DOS, aceita o app
+  `RuntimeBroker.exe` e o cliente de teste `ReadWriteUser.exe`, e não usa
+  fallback por basename.
+- Todas as aquisições de push lock têm `KeEnterCriticalRegion` e
+  `KeLeaveCriticalRegion` pareados.
+- Falhas de lookup preenchem `operation_status` quando a resposta já é válida.
+- `VirtualCopyProcess` tem posse explícita da referência de `PEPROCESS`: o
+  callee consome a referência inclusive em retornos antecipados, faz detach
+  quando necessário e reporta `transferred` com granularidade por página.
+- A cobertura offline do loader vendorado foi registrada em
+  [`tools/kdmapper-src/VENDORING.md`](../tools/kdmapper-src/VENDORING.md) para
+  o kernel local `10.0.26100.9457`; isso não substitui o teste de execução.
 
-- **Impacto:** o evento de conclusão do work item é sinalizado dentro do próprio
-  callback, antes de ele de fato retornar. Além disso, existe uma janela entre
-  publicar o estado `REVOKING` e resetar o evento: um sinal antigo pode ser
-  consumido, levando a `IDLE` prematuro e ao reuso/liberação prematura da
-  imagem. Isso pode causar use-after-free ou BSOD ao descarregar o driver ou
-  quando o processo autorizado encerra.
-- **Mitigação provisória:** **não descarregar o driver durante o uso**.
-- **Status:** aberto; requer redesenho do protocolo de conclusão e teardown.
+## Riscos abertos e validação obrigatória em VM
 
-### CRÍTICO — Hook e epílogo dentro da imagem liberável
+Os pontos abaixo continuam residuais e não devem ser tratados como validados
+apenas por compilação ou inspeção estática:
 
-- **Impacto:** o hook e seu epílogo executam dentro da imagem que pode ser
-  liberada. O rundown é liberado antes do retorno real do hook, e o hook
-  executa antes da aquisição da proteção necessária.
-- **Mitigação/correção robusta necessária:** usar um trampoline e objetos de
-  sincronização em memória estável do mapper, mantendo a proteção enquanto o
-  payload é chamado e sinalizando somente depois que a chamada ao payload
-  retornar.
-- **Status:** não implementado.
+- ACL/`IoCreateDeviceSecure` a partir de uma imagem mapeada manualmente;
+- `IRP_MJ_CREATE` e a identidade real do opener;
+- attach + probe sob alvos reais, incluindo páginas inválidas, operações
+  cross-page e processo encerrando;
+- semântica de partial copy;
+- concorrência de IOCTLs;
+- HVCI ativo: o preflight deve recusar o carregamento, e esse teste negativo
+  ainda precisa ser executado;
+- PatchGuard, CFG e Driver Verifier;
+- identidade e RVAs do `ntoskrnl` em outra build/perfil;
+- comportamento do exploit `iqvw64e.sys` v1.03.0.7 sob blocklist de drivers
+  vulneráveis, antivírus/EDR e anti-cheat.
 
-### ALTO — Ausência de `__finally` na execução completa do hook
+O loader vendorado foi validado por varredura estática somente para os arquivos
+locais descritos no `VENDORING.md`; não houve invocação do loader, carga do
+driver vulnerável, mapeamento ou execução do payload durante essa auditoria.
+`tools/kdmapper.exe` continua sendo o binário legado não auditado; a fonte em
+`tools/kdmapper-src/` é a referência para build e correção.
 
-- **Impacto:** não há `__finally` envolvendo a execução completa do hook; uma
-  exceção não tratada entre a aquisição e a liberação pode vazar a contagem do
-  rundown.
-- **Mitigação:** não considerar o teardown seguro até que a execução completa
-  esteja protegida por cleanup garantido.
-- **Status:** aberto; faz parte do redesenho necessário.
+## Lifetime e unload
 
-## Não validado em VM
+O mapper libera a imagem alocada quando o mapeamento falha e o payload exclui o
+device se a criação do symlink falhar. A referência de processo e o attach da
+cópia virtual têm cleanup explícito nos caminhos implementados. Isso não é uma
+garantia geral para todo o ciclo de vida em execução: device, dispatch, imagem
+mapeada e comportamento após falhas ainda precisam da validação em VM listada
+acima.
 
-Os seguintes comportamentos ainda não foram validados em uma VM isolada:
+`DriverUnload = NULL`: **não descarregue o driver**. Hot-unload não é suportado;
+a imagem permanece até o reboot. Para limpar um teste, feche o app e reinicie
+ou restaure o checkpoint da VM. Não transforme a ausência de unload em uma
+correção local sem redesenho explícito do lifetime.
 
-- handshake real e semântica de retorno de `NtUserSetSysColors`;
-- contexto, IRQL e `PreviousMode` no ponto do hook;
-- aceitação e lifetime do process notify vindo de imagem mapeada manualmente;
-- PatchGuard, HVCI, CFG e Driver Verifier;
-- offsets de `win32k`/`ntoskrnl` na build alvo;
-- tradução física sob remapeamento, paginação e encerramento de processo;
-- corridas de teardown/revogação sob concorrência;
-- unload real.
+## Artefatos
 
-## Artefatos e validações conhecidas
-
-- O `hexData` do payload tem 13824 bytes, SHA-256
-  `C5390F4BBDC28A7A02C0E0D29E86E4A69288DD23FE41A7223A846FB59FB62E61` e é
-  byte-idêntico (0 divergências) a
-  `ReadWriteDriver/x64/Release/ReadWriteDriver.sys`.
-- `ReadWriteDriverMapper.sys` tem 22016 bytes.
-- O build Release do app e o `ctest` (1/1) estão verdes; `tools/dump_offsets.py
-  --check` retorna `up to date` para 182 offsets.
-
-Essas validações não eliminam os riscos de teardown nem substituem a validação
-em VM.
-
-## Aviso de artefatos
-
-Os arquivos `.sys` **não são versionados no repositório**. Eles precisam ser
-compilados com o WDK e o payload embutido precisa ser regenerado antes do uso.
-Consulte as instruções em [`ReadWriteDriver/README.md`](../ReadWriteDriver/README.md).
+Os arquivos `.sys` não são versionados. Compile com o WDK e regenere o payload
+após cada recompilação do driver; mantenha perfil, driver, mapper e hashes do
+mesmo build juntos. Consulte [`ReadWriteDriver/README.md`](../ReadWriteDriver/README.md)
+e [`docs/testing.md`](testing.md) para o fluxo autorizado.

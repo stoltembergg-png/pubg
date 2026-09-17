@@ -115,39 +115,6 @@ uintptr_t Memory::GetImportTableAddress(std::string import, std::string process,
 	return 0;
 }
 
-bool Memory::FixCr3()
-{
-	uintptr_t data_anchor = this->current_process.base_address + SDK.Decrypt;
-	LOG("[*] Trying Data Anchor to find isolated CR3 at 0x%p...\n", (void*)data_anchor);
-	uintptr_t cr3 = driver.FindRealCr3(this->current_process.PID, this->current_process.base_address, data_anchor);
-
-	if (!cr3) {
-		LOG("[-] Data Anchor CR3 failed. Falling back to Base CR3...\n");
-		cr3 = driver.FindRealCr3(this->current_process.PID, this->current_process.base_address, this->current_process.base_address);
-	}
-
-	if (!cr3) {
-		cr3 = driver.GetProcessCr3(this->current_process.PID);
-		if (cr3) {
-			char test_buffer[2] = { 0 };
-			if (!driver.ReadMemory(this->current_process.PID, this->current_process.base_address, test_buffer, 2)) {
-				LOG("[-] GetProcessCr3 returned an isolated/invalid CR3 context. Verification failed.\n");
-				cr3 = 0;
-			}
-			else {
-				LOG("[+] Verified CR3 via GetProcessCr3: %p\n", cr3);
-			}
-		}
-	}
-	if (!cr3) {
-		LOG("[-] Failed to find any valid CR3 context\n");
-		return false;
-	}
-	
-	LOG("[+] Patched DTB / CR3 Resolved: %p\n", cr3);
-	return true;
-}
-
 bool Memory::DumpMemory(uintptr_t address, std::string path)
 {
 	return false;
@@ -182,5 +149,4 @@ bool Memory::BatchRead(DriverInterfaceV3::BatchReadEntry* entries, size_t count)
 {
 	return const_cast<Memory*>(this)->driver.BatchReadMemory(this->current_process.PID, entries, count);
 }
-
 

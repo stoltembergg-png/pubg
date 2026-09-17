@@ -1,656 +1,538 @@
 #include "driver.h"
-#include "physmem.h"
+#include "payload_api.h"
+#include "virtual_copy.h"
 
-t_Win32FreePool Win32FreePool;
-MmAllocateIndependentPages_t MmAllocateIndependentPages;
+#include "../../PubgExt/driver/ioctl_protocol.h"
 
-static HANDLE g_authorized_pid = NULL;
-static PEPROCESS g_authorized_process = NULL;
-static uint64_t g_session_token = 0;
-static PVOID g_win32freepool_slot = NULL;
-static BOOLEAN g_process_notify_registered = FALSE;
-static EX_RUNDOWN_REF g_authorization_rundown;
-static volatile LONG g_authorization_state = 0;
-static volatile LONG g_revoke_requested = FALSE;
-static volatile LONG g_rundown_completed = FALSE;
-static volatile LONG g_rundown_initialized = FALSE;
-static volatile LONG g_notify_unregister_status = STATUS_SUCCESS;
-static WORK_QUEUE_ITEM g_revoke_work_item;
-static KEVENT g_revoke_work_done;
-static volatile LONG g_revoke_work_initialized = FALSE;
-static volatile LONG g_revoke_work_queued = FALSE;
-static volatile LONG g_teardown_status = STATUS_SUCCESS;
+#define PUBGEXT_DEVICE_NAME L"\\Device\\PubgExtRw"
+#define PUBGEXT_DOS_NAME L"\\DosDevices\\PubgExtRw"
 
-#define AUTH_STATE_IDLE       0
-#define AUTH_STATE_INSTALLING 1
-#define AUTH_STATE_ACTIVE     2
-#define AUTH_STATE_REVOKING   3
+/* This kernel export is not declared by every WDK ntifs.h version. */
+NTSYSAPI PVOID NTAPI PsGetProcessWow64Process(_In_ PEPROCESS Process);
 
-static __int64 __fastcall hook(__int64 a, __int64 b, __int64 c);
-static VOID ProcessNotify(PEPROCESS process, HANDLE process_id,
-	PPS_CREATE_NOTIFY_INFO create_info);
-static NTSTATUS ShutdownAuthorization(BOOLEAN from_work_item);
-static VOID RevokeWorkItem(PVOID context);
+/* Stable private device class GUID for this project. */
+static const GUID g_device_class_guid =
+    { 0x6f4e2f9b, 0x9c1d, 0x4e83, { 0x9b, 0x1d, 0x2a, 0x73, 0x8e, 0x4c, 0x11, 0x52 } };
+static PDEVICE_OBJECT g_device_object;
+static EX_PUSH_LOCK g_session_lock;
 
-static __int64 CallOriginal(t_Win32FreePool original, __int64 a, __int64 b, __int64 c)
+typedef struct _PUBGEXT_FILE_CONTEXT {
+    PEPROCESS opener_process;
+} PUBGEXT_FILE_CONTEXT;
+
+static NTSTATUS CompleteCreate(PIRP irp, NTSTATUS status)
 {
-	return original ? original(a, b, c) : 0;
+    irp->IoStatus.Status = status;
+    irp->IoStatus.Information = 0;
+    IoCompleteRequest(irp, IO_NO_INCREMENT);
+    return status;
 }
 
-static __int64 CallOriginalAndRelease(t_Win32FreePool original,
-	__int64 a, __int64 b, __int64 c)
+/*
+ * Exact DOS image paths allowed to open the device on this machine. These
+ * paths vary by machine and build directory; adding another executable
+ * requires editing this single allowlist. There is deliberately no basename,
+ * root, or suffix fallback.
+ */
+static const UNICODE_STRING g_allowed_image_paths[] = {
+    RTL_CONSTANT_STRING(L"\\??\\D:\\PROJETOS\\PUBG\\BUILD-FIX2\\RELEASE\\RUNTIMEBROKER.EXE"),
+    RTL_CONSTANT_STRING(L"\\??\\D:\\PROJETOS\\PUBG\\READWRITEDRIVER\\X64\\RELEASE\\READWRITEUSER.EXE")
+};
+
+static BOOLEAN EqualCanonicalImagePath(PUNICODE_STRING image_name)
 {
-	__int64 result = CallOriginal(original, a, b, c);
-	ExReleaseRundownProtection(&g_authorization_rundown);
-	return result;
+    UNICODE_STRING normalized = { 0 };
+    UNICODE_STRING volume_name = { 0 };
+    UNICODE_STRING dos_name = { 0 };
+    UNICODE_STRING dos_normalized = { 0 };
+    UNICODE_STRING canonical = { 0 };
+    UNICODE_STRING native_prefix = RTL_CONSTANT_STRING(L"\\DEVICE\\HARDDISKVOLUME");
+    UNICODE_STRING dos_devices_prefix = RTL_CONSTANT_STRING(L"\\DOSDEVICES\\");
+    UNICODE_STRING dos_prefix = RTL_CONSTANT_STRING(L"\\??\\");
+    PFILE_OBJECT file_object = NULL;
+    PDEVICE_OBJECT volume_device = NULL;
+    BOOLEAN equal = FALSE;
+    NTSTATUS status;
+    USHORT volume_length;
+    USHORT suffix_length;
+    USHORT dos_tail_length;
+    USHORT canonical_length;
+    PWCHAR dos_tail;
+    USHORT index;
+    ULONG i;
+
+    if (!image_name || !image_name->Buffer || image_name->Length == 0)
+        return FALSE;
+    if (!NT_SUCCESS(RtlUpcaseUnicodeString(&normalized, image_name, TRUE)))
+        return FALSE;
+    for (index = 0; index < normalized.Length / sizeof(WCHAR); ++index)
+        if (normalized.Buffer[index] == L'/')
+            normalized.Buffer[index] = L'\\';
+
+    /* Resolve the native volume to its DOS name before any authorization. */
+    if (!RtlPrefixUnicodeString(&native_prefix, &normalized, FALSE))
+        goto done;
+    index = (USHORT)(native_prefix.Length / sizeof(WCHAR));
+    while (index < normalized.Length / sizeof(WCHAR) &&
+        normalized.Buffer[index] >= L'0' && normalized.Buffer[index] <= L'9')
+        ++index;
+    if (index == native_prefix.Length / sizeof(WCHAR) ||
+        index >= normalized.Length / sizeof(WCHAR) ||
+        normalized.Buffer[index] != L'\\')
+        goto done;
+    volume_length = (USHORT)(index * sizeof(WCHAR));
+    suffix_length = normalized.Length - volume_length;
+    if (suffix_length == 0)
+        goto done;
+
+    volume_name.Length = volume_length;
+    volume_name.MaximumLength = volume_length + sizeof(WCHAR);
+    volume_name.Buffer = ExAllocatePool2(POOL_FLAG_PAGED,
+        volume_name.MaximumLength, 'pVwP');
+    if (!volume_name.Buffer)
+        goto done;
+    RtlCopyMemory(volume_name.Buffer, normalized.Buffer, volume_length);
+    volume_name.Buffer[volume_length / sizeof(WCHAR)] = L'\0';
+    status = IoGetDeviceObjectPointer(&volume_name, FILE_READ_ATTRIBUTES,
+        &file_object, &volume_device);
+    if (!NT_SUCCESS(status))
+        goto done;
+    status = IoVolumeDeviceToDosName(volume_device, &dos_name);
+    if (!NT_SUCCESS(status) || !dos_name.Buffer || dos_name.Length == 0)
+        goto done;
+    if (!NT_SUCCESS(RtlUpcaseUnicodeString(&dos_normalized, &dos_name, TRUE)))
+        goto done;
+
+    if (RtlPrefixUnicodeString(&dos_devices_prefix, &dos_normalized, FALSE))
+    {
+        dos_tail = dos_normalized.Buffer +
+            dos_devices_prefix.Length / sizeof(WCHAR);
+        dos_tail_length = dos_normalized.Length - dos_devices_prefix.Length;
+    }
+    else if (RtlPrefixUnicodeString(&dos_prefix, &dos_normalized, FALSE))
+    {
+        dos_tail = dos_normalized.Buffer + dos_prefix.Length / sizeof(WCHAR);
+        dos_tail_length = dos_normalized.Length - dos_prefix.Length;
+    }
+    else
+        goto done;
+    if (dos_tail_length < 2 * sizeof(WCHAR) || dos_tail[1] != L':')
+        goto done;
+    if (suffix_length > MAXUSHORT - dos_prefix.Length ||
+        dos_tail_length > MAXUSHORT - dos_prefix.Length - suffix_length)
+        goto done;
+    canonical_length = dos_prefix.Length + dos_tail_length + suffix_length;
+    canonical.MaximumLength = canonical_length + sizeof(WCHAR);
+    canonical.Length = canonical_length;
+    canonical.Buffer = ExAllocatePool2(POOL_FLAG_PAGED,
+        canonical.MaximumLength, 'cVwP');
+    if (!canonical.Buffer)
+        goto done;
+    RtlCopyMemory(canonical.Buffer, dos_prefix.Buffer, dos_prefix.Length);
+    RtlCopyMemory(canonical.Buffer + dos_prefix.Length / sizeof(WCHAR),
+        dos_tail, dos_tail_length);
+    RtlCopyMemory(canonical.Buffer +
+        (dos_prefix.Length + dos_tail_length) / sizeof(WCHAR),
+        normalized.Buffer + volume_length / sizeof(WCHAR), suffix_length);
+    canonical.Buffer[canonical.Length / sizeof(WCHAR)] = L'\0';
+
+    for (i = 0; i < RTL_NUMBER_OF(g_allowed_image_paths); ++i)
+    {
+        if (RtlEqualUnicodeString(&canonical, &g_allowed_image_paths[i], FALSE))
+        {
+            equal = TRUE;
+            break;
+        }
+    }
+done:
+    if (file_object)
+        ObDereferenceObject(file_object);
+    if (dos_name.Buffer)
+        ExFreePool(dos_name.Buffer);
+    if (canonical.Buffer)
+        ExFreePool(canonical.Buffer);
+    if (dos_normalized.Buffer)
+        RtlFreeUnicodeString(&dos_normalized);
+    if (volume_name.Buffer)
+        ExFreePool(volume_name.Buffer);
+    if (normalized.Buffer)
+        RtlFreeUnicodeString(&normalized);
+    return equal;
 }
 
-static VOID GenerateSessionToken(void)
+static BOOLEAN IsAllowedOpener(PEPROCESS process)
 {
-	UUID uuid = { 0 };
-	if (NT_SUCCESS(ExUuidCreate(&uuid)))
-		RtlCopyMemory(&g_session_token, &uuid, sizeof(g_session_token));
+    PUNICODE_STRING image_name = NULL;
+    BOOLEAN allowed = FALSE;
+    if (!process || !NT_SUCCESS(SeLocateProcessImageName(process, &image_name)))
+        return FALSE;
+    /* A basename is deliberately never used as an authorization fallback. */
+    allowed = EqualCanonicalImagePath(image_name);
+    if (image_name)
+        ExFreePool(image_name);
+    return allowed;
+}
 
-	/* ExUuidCreate is the primary source; this is only a non-zero fallback. */
-	if (g_session_token != 0)
-		return;
-
-	LARGE_INTEGER counter = KeQueryPerformanceCounter(NULL);
-	g_session_token = (uint64_t)counter.QuadPart ^
-		((uint64_t)(ULONG_PTR)PsGetCurrentProcessId() << 32) ^
-		(uint64_t)(ULONG_PTR)&g_session_token;
-	if (g_session_token == 0)
-		g_session_token = (~(uint64_t)(ULONG_PTR)&g_session_token) | 1ULL;
+static NTSTATUS ValidateRequestHeader(const PUBGEXT_REQUEST_HEADER* header,
+    ULONG expected_size)
+{
+    if (!header)
+        return STATUS_INVALID_PARAMETER;
+    if (header->magic != PUBGEXT_IOCTL_MAGIC)
+        return STATUS_INVALID_PARAMETER;
+    if (header->major != PUBGEXT_PROTOCOL_MAJOR ||
+        header->minor != PUBGEXT_PROTOCOL_MINOR)
+        return STATUS_REVISION_MISMATCH;
+    if (header->struct_size != expected_size)
+        return STATUS_INFO_LENGTH_MISMATCH;
+    if (header->flags != 0 || header->reserved != 0)
+        return STATUS_INVALID_PARAMETER;
+    return STATUS_SUCCESS;
 }
 
 static BOOLEAN IsUserRange(uint64_t address, uint64_t length)
 {
-	ULONG_PTR start;
-	ULONG_PTR highest = (ULONG_PTR)MM_HIGHEST_USER_ADDRESS;
-
-	if (address == 0 || length == 0 || address > (uint64_t)highest)
-		return FALSE;
-	start = (ULONG_PTR)address;
-	return length - 1 <= (uint64_t)(highest - start);
+    uint64_t highest = (uint64_t)(ULONG_PTR)MM_HIGHEST_USER_ADDRESS;
+    if (address == 0 || length == 0 || address > highest)
+        return FALSE;
+    return length - 1 <= highest - address;
 }
 
-static NTSTATUS CopyCommandFromKernel(PVOID address, Command* command)
+static VOID FillResponse(PUBGEXT_RESPONSE_HEADER* response,
+    uint64_t request_id, NTSTATUS operation_status, uint64_t transferred,
+    uint32_t struct_size)
 {
-	if (!address || !command)
-		return STATUS_INVALID_PARAMETER;
-
-	__try
-	{
-		RtlCopyMemory(command, address, sizeof(Command));
-	}
-	__except (EXCEPTION_EXECUTE_HANDLER)
-	{
-		return GetExceptionCode();
-	}
-
-	return STATUS_SUCCESS;
+    RtlZeroMemory(response, sizeof(*response));
+    response->magic = PUBGEXT_IOCTL_MAGIC;
+    response->major = PUBGEXT_PROTOCOL_MAJOR;
+    response->minor = PUBGEXT_PROTOCOL_MINOR;
+    response->struct_size = struct_size;
+    response->request_id = request_id;
+    response->operation_status = (int32_t)operation_status;
+    response->transferred = transferred;
 }
 
-static NTSTATUS CompleteCommand(uint64_t user_result, NTSTATUS status,
-	uint64_t result, BOOLEAN update_token)
+static NTSTATUS LookupTarget(const PUBGEXT_READ_REQUEST* request,
+    PEPROCESS* process)
 {
-	PVOID address = (PVOID)(ULONG_PTR)user_result;
-	if (!IsUserRange(user_result, sizeof(Command)))
-		return STATUS_INVALID_PARAMETER;
-
-	__try
-	{
-		Command* command = (Command*)address;
-		ProbeForWrite(command, sizeof(Command), __alignof(Command));
-		command->status = (int32_t)status;
-		command->result = result;
-		if (update_token)
-			command->auth_token = g_session_token;
-		command->op = 0;
-	}
-	__except (EXCEPTION_EXECUTE_HANDLER)
-	{
-		return GetExceptionCode();
-	}
-
-	return STATUS_SUCCESS;
+    NTSTATUS status;
+    if (!request->pid || !IsUserRange(request->remote_va, request->length))
+        return STATUS_INVALID_PARAMETER;
+    status = PsLookupProcessByProcessId((HANDLE)(ULONG_PTR)request->pid, process);
+    if (!NT_SUCCESS(status))
+        return status;
+    /* Protocol v2 intentionally has no WOW64 address ABI. */
+    if (PsGetProcessWow64Process(*process))
+    {
+        ObDereferenceObject(*process);
+        *process = NULL;
+        return STATUS_NOT_SUPPORTED;
+    }
+    return STATUS_SUCCESS;
 }
 
-static NTSTATUS UnregisterProcessNotify(VOID)
+static NTSTATUS DispatchCreate(PDEVICE_OBJECT device, PIRP irp)
 {
-	if (!g_process_notify_registered)
-		return STATUS_SUCCESS;
+    PFILE_OBJECT file_object = IoGetCurrentIrpStackLocation(irp)->FileObject;
+    PEPROCESS opener;
+    PUBGEXT_FILE_CONTEXT* context;
+    NTSTATUS status = STATUS_ACCESS_DENIED;
+    UNREFERENCED_PARAMETER(device);
 
-	NTSTATUS status = PsSetCreateProcessNotifyRoutineEx(ProcessNotify, TRUE);
-	if (NT_SUCCESS(status))
-		g_process_notify_registered = FALSE;
-	else
-		InterlockedExchange(&g_notify_unregister_status, status);
-	return status;
+    if (irp->RequestorMode != UserMode)
+        return CompleteCreate(irp, STATUS_ACCESS_DENIED);
+    opener = IoGetRequestorProcess(irp);
+    if (!opener || !IsAllowedOpener(opener))
+        return CompleteCreate(irp, STATUS_ACCESS_DENIED);
+    context = ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(*context), 'sRwP');
+    if (!context)
+        return CompleteCreate(irp, STATUS_INSUFFICIENT_RESOURCES);
+    ObReferenceObject(opener);
+    context->opener_process = opener;
+
+    KeEnterCriticalRegion();
+    ExAcquirePushLockExclusive(&g_session_lock);
+    if (!g_session_object)
+    {
+        g_session_object = context;
+        file_object->FsContext = context;
+        status = STATUS_SUCCESS;
+    }
+    ExReleasePushLockExclusive(&g_session_lock);
+    KeLeaveCriticalRegion();
+    if (!NT_SUCCESS(status))
+    {
+        ObDereferenceObject(context->opener_process);
+        ExFreePool(context);
+    }
+    return CompleteCreate(irp, status);
 }
 
-static VOID QueueRevocationWork(VOID)
+static NTSTATUS DispatchCleanup(PDEVICE_OBJECT device, PIRP irp)
 {
-	if (InterlockedCompareExchange(&g_revoke_work_queued, TRUE, FALSE) == FALSE)
-	{
-		KeResetEvent(&g_revoke_work_done);
-		ExQueueWorkItem(&g_revoke_work_item, DelayedWorkQueue);
-	}
+    PFILE_OBJECT file_object = IoGetCurrentIrpStackLocation(irp)->FileObject;
+    PUBGEXT_FILE_CONTEXT* context;
+    UNREFERENCED_PARAMETER(device);
+
+    KeEnterCriticalRegion();
+    ExAcquirePushLockExclusive(&g_session_lock);
+    context = (PUBGEXT_FILE_CONTEXT*)file_object->FsContext;
+    file_object->FsContext = NULL;
+    if (context && g_session_object == (PVOID)context)
+        g_session_object = NULL;
+    ExReleasePushLockExclusive(&g_session_lock);
+    KeLeaveCriticalRegion();
+    if (context)
+    {
+        ObDereferenceObject(context->opener_process);
+        ExFreePool(context);
+    }
+    return CompleteCreate(irp, STATUS_SUCCESS);
 }
 
-static VOID UnpublishAuthorizationHook(VOID)
+static NTSTATUS DispatchClose(PDEVICE_OBJECT device, PIRP irp)
 {
-	PVOID hook_slot = InterlockedCompareExchangePointer(
-		(PVOID volatile*)&g_win32freepool_slot, NULL, NULL);
-	if (hook_slot && Win32FreePool)
-	{
-		/* Do not overwrite a third party that replaced our hook meanwhile. */
-		InterlockedCompareExchangePointer((PVOID volatile*)hook_slot,
-			(PVOID)Win32FreePool, (PVOID)&hook);
-	}
-	InterlockedExchangePointer((PVOID volatile*)&g_win32freepool_slot, NULL);
-	Win32FreePool = NULL;
+    UNREFERENCED_PARAMETER(device);
+    return CompleteCreate(irp, STATUS_SUCCESS);
 }
 
-static VOID CompleteAuthorizationRundown(VOID)
+static NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT device, PIRP irp)
 {
-	/* State REVOKING prevents new hook entrants before this drain. */
-	ExWaitForRundownProtectionRelease(&g_authorization_rundown);
-	if (InterlockedCompareExchange(&g_rundown_completed, TRUE, FALSE) == FALSE)
-		ExRundownCompleted(&g_authorization_rundown);
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(irp);
+    ULONG code = stack->Parameters.DeviceIoControl.IoControlCode;
+    ULONG input_length = stack->Parameters.DeviceIoControl.InputBufferLength;
+    ULONG output_length = stack->Parameters.DeviceIoControl.OutputBufferLength;
+    PVOID buffer = irp->AssociatedIrp.SystemBuffer;
+    PFILE_OBJECT file_object = stack->FileObject;
+    PUBGEXT_FILE_CONTEXT* context;
+    PEPROCESS requestor;
+    NTSTATUS status = STATUS_SUCCESS;
+    NTSTATUS operation_status;
+    PEPROCESS target = NULL;
+    ULONG transferred = 0;
+    uint64_t response_length;
+    BOOLEAN session_lock_held = FALSE;
+    BOOLEAN response_valid = FALSE;
+
+    /* Known IOCTL check intentionally precedes every other check. */
+    if (code != PUBGEXT_IOCTL_AUTH && code != PUBGEXT_IOCTL_QUERY_CAPS &&
+        code != PUBGEXT_IOCTL_READ && code != PUBGEXT_IOCTL_WRITE)
+    {
+        status = STATUS_INVALID_DEVICE_REQUEST;
+        goto reject;
+    }
+    if (irp->RequestorMode != UserMode)
+        goto reject_access;
+
+    KeEnterCriticalRegion();
+    ExAcquirePushLockShared(&g_session_lock);
+    session_lock_held = TRUE;
+    context = (PUBGEXT_FILE_CONTEXT*)file_object->FsContext;
+    requestor = IoGetRequestorProcess(irp);
+    if (!context || (PVOID)context != g_session_object || !context->opener_process ||
+        requestor != context->opener_process)
+    {
+        goto reject_access;
+    }
+    if (!buffer || input_length < PUBGEXT_REQUEST_FIXED_SIZE)
+    {
+        goto reject_length;
+    }
+
+    if (code == PUBGEXT_IOCTL_AUTH)
+    {
+        status = ValidateRequestHeader((PUBGEXT_REQUEST_HEADER*)buffer,
+            sizeof(PUBGEXT_REQUEST_HEADER));
+        if (NT_SUCCESS(status) && (input_length != sizeof(PUBGEXT_REQUEST_HEADER) ||
+            output_length != sizeof(PUBGEXT_RESPONSE_HEADER)))
+            status = STATUS_INFO_LENGTH_MISMATCH;
+        if (NT_SUCCESS(status))
+        {
+            FillResponse((PUBGEXT_RESPONSE_HEADER*)buffer,
+                ((PUBGEXT_REQUEST_HEADER*)buffer)->request_id, STATUS_SUCCESS, 0,
+                sizeof(PUBGEXT_RESPONSE_HEADER));
+            irp->IoStatus.Information = sizeof(PUBGEXT_RESPONSE_HEADER);
+        }
+        goto finish;
+    }
+    if (code == PUBGEXT_IOCTL_QUERY_CAPS)
+    {
+        PUBGEXT_QUERY_CAPS_RESPONSE* response = (PUBGEXT_QUERY_CAPS_RESPONSE*)buffer;
+        status = ValidateRequestHeader((PUBGEXT_REQUEST_HEADER*)buffer,
+            sizeof(PUBGEXT_REQUEST_HEADER));
+        if (NT_SUCCESS(status) && (input_length != sizeof(PUBGEXT_REQUEST_HEADER) ||
+            output_length != sizeof(*response)))
+            status = STATUS_INFO_LENGTH_MISMATCH;
+        if (NT_SUCCESS(status))
+        {
+            FillResponse(&response->header,
+                ((PUBGEXT_REQUEST_HEADER*)buffer)->request_id, STATUS_SUCCESS, 0,
+                sizeof(*response));
+            response->caps = PUBGEXT_CAP_AUTH | PUBGEXT_CAP_QUERY |
+                PUBGEXT_CAP_READ | PUBGEXT_CAP_WRITE | PUBGEXT_CAP_VIRTUAL;
+            response->max_transfer = PUBGEXT_MAX_TRANSFER;
+            irp->IoStatus.Information = sizeof(*response);
+        }
+        goto finish;
+    }
+
+    if (code == PUBGEXT_IOCTL_READ)
+    {
+        PUBGEXT_READ_REQUEST* request = (PUBGEXT_READ_REQUEST*)buffer;
+        if (input_length != sizeof(*request))
+            status = STATUS_INFO_LENGTH_MISMATCH;
+        else
+            status = ValidateRequestHeader(&request->header, sizeof(*request));
+        if (NT_SUCCESS(status) && (output_length < sizeof(PUBGEXT_RESPONSE_HEADER) ||
+            request->length == 0 || request->length > PUBGEXT_MAX_TRANSFER ||
+            (uint64_t)sizeof(PUBGEXT_RESPONSE_HEADER) + request->length > MAXULONG ||
+            output_length != sizeof(PUBGEXT_RESPONSE_HEADER) + request->length))
+            status = STATUS_INVALID_BUFFER_SIZE;
+        if (NT_SUCCESS(status))
+        {
+            if (request->reserved0 || request->reserved1 || request->pid == 0 ||
+                !IsUserRange(request->remote_va, request->length))
+                status = STATUS_INVALID_PARAMETER;
+            else
+            {
+                response_valid = TRUE;
+                status = LookupTarget(request, &target);
+            }
+        }
+        if (NT_SUCCESS(status))
+        {
+            operation_status = VirtualCopyProcess(target, request->remote_va,
+                (PUCHAR)buffer + sizeof(PUBGEXT_RESPONSE_HEADER), request->length,
+                FALSE, &transferred);
+            target = NULL; /* VirtualCopyProcess consumes the lookup reference. */
+        }
+        else
+            operation_status = status;
+        if (response_valid)
+        {
+            FillResponse((PUBGEXT_RESPONSE_HEADER*)buffer, request->header.request_id,
+                operation_status, transferred, sizeof(PUBGEXT_RESPONSE_HEADER));
+            irp->IoStatus.Information = sizeof(PUBGEXT_RESPONSE_HEADER) + transferred;
+            status = STATUS_SUCCESS;
+        }
+        goto finish;
+    }
+
+    /* WRITE: validate fixed header before checking fixed-size-plus-data. */
+    {
+        PUBGEXT_WRITE_REQUEST* request = (PUBGEXT_WRITE_REQUEST*)buffer;
+        if (input_length < PUBGEXT_WRITE_FIXED_SIZE)
+            status = STATUS_INFO_LENGTH_MISMATCH;
+        else
+            status = ValidateRequestHeader(&request->header,
+                PUBGEXT_WRITE_FIXED_SIZE);
+        if (NT_SUCCESS(status) && (request->length == 0 ||
+            request->length > PUBGEXT_MAX_TRANSFER ||
+            request->length > MAXULONG - PUBGEXT_WRITE_FIXED_SIZE ||
+            input_length != PUBGEXT_WRITE_FIXED_SIZE + request->length ||
+            output_length != sizeof(PUBGEXT_RESPONSE_HEADER)))
+            status = STATUS_INVALID_BUFFER_SIZE;
+        if (NT_SUCCESS(status))
+        {
+            if (request->reserved0 || request->reserved1 || request->pid == 0 ||
+                !IsUserRange(request->remote_va, request->length))
+                status = STATUS_INVALID_PARAMETER;
+            else
+            {
+                response_valid = TRUE;
+                status = LookupTarget((PUBGEXT_READ_REQUEST*)request, &target);
+            }
+        }
+        if (NT_SUCCESS(status))
+        {
+            operation_status = VirtualCopyProcess(target, request->remote_va,
+                request->data, request->length, TRUE, &transferred);
+            target = NULL; /* VirtualCopyProcess consumes the lookup reference. */
+        }
+        else
+            operation_status = status;
+        if (response_valid)
+        {
+            FillResponse((PUBGEXT_RESPONSE_HEADER*)buffer, request->header.request_id,
+                operation_status, transferred, sizeof(PUBGEXT_RESPONSE_HEADER));
+            irp->IoStatus.Information = sizeof(PUBGEXT_RESPONSE_HEADER);
+            status = STATUS_SUCCESS;
+        }
+    }
+
+finish:
+    if (session_lock_held)
+    {
+        ExReleasePushLockShared(&g_session_lock);
+        KeLeaveCriticalRegion();
+    }
+    irp->IoStatus.Status = status;
+    if (!NT_SUCCESS(status))
+        irp->IoStatus.Information = 0;
+    IoCompleteRequest(irp, IO_NO_INCREMENT);
+    return status;
+
+reject_access:
+    status = STATUS_ACCESS_DENIED;
+    if (session_lock_held)
+        goto finish;
+    goto reject;
+reject_length:
+    status = STATUS_INFO_LENGTH_MISMATCH;
+    if (session_lock_held)
+        goto finish;
+reject:
+    irp->IoStatus.Status = status;
+    irp->IoStatus.Information = 0;
+    IoCompleteRequest(irp, IO_NO_INCREMENT);
+    return status;
 }
 
-static VOID CleanupAuthorizationResources(VOID)
+NTSTATUS PayloadInitialize(const PUBGEXT_PAYLOAD_INIT* init,
+    PUBGEXT_PAYLOAD_INIT_RESULT* result)
 {
-	PEPROCESS authorized_process = (PEPROCESS)InterlockedExchangePointer(
-		(PVOID volatile*)&g_authorized_process, NULL);
+    UNICODE_STRING device_name = RTL_CONSTANT_STRING(PUBGEXT_DEVICE_NAME);
+    UNICODE_STRING dos_name = RTL_CONSTANT_STRING(PUBGEXT_DOS_NAME);
+    UNICODE_STRING sddl = RTL_CONSTANT_STRING(L"D:P(A;;GA;;;SY)(A;;GA;;;BA)");
+    PDRIVER_OBJECT driver_object;
+    NTSTATUS status;
 
-	g_authorized_pid = NULL;
-	g_session_token = 0;
+    if (result)
+        RtlZeroMemory(result, sizeof(*result));
+    if (!init || !result || init->struct_size != sizeof(*init) ||
+        init->abi_major != PUBGEXT_PAYLOAD_ABI_MAJOR ||
+        init->abi_minor != PUBGEXT_PAYLOAD_ABI_MINOR ||
+        init->driver_object == 0)
+        return STATUS_INVALID_PARAMETER;
+    result->struct_size = sizeof(*result);
+    result->abi_major = PUBGEXT_PAYLOAD_ABI_MAJOR;
+    result->abi_minor = PUBGEXT_PAYLOAD_ABI_MINOR;
+    driver_object = (PDRIVER_OBJECT)(ULONG_PTR)init->driver_object;
 
-	if (authorized_process)
-		ObDereferenceObject(authorized_process);
-}
+    ExInitializePushLock(&g_session_lock);
+    status = IoCreateDeviceSecure(driver_object, 0, &device_name,
+        (DEVICE_TYPE)PUBGEXT_IOCTL_DEVICE_TYPE, FILE_DEVICE_SECURE_OPEN, FALSE,
+        &sddl, &g_device_class_guid, &g_device_object);
+    if (!NT_SUCCESS(status))
+        goto done;
+    status = IoCreateSymbolicLink(&dos_name, &device_name);
+    if (!NT_SUCCESS(status))
+    {
+        IoDeleteDevice(g_device_object);
+        g_device_object = NULL;
+        goto done;
+    }
+    driver_object->MajorFunction[IRP_MJ_CREATE] = DispatchCreate;
+    driver_object->MajorFunction[IRP_MJ_CLEANUP] = DispatchCleanup;
+    driver_object->MajorFunction[IRP_MJ_CLOSE] = DispatchClose;
+    driver_object->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DispatchDeviceControl;
+    /* Conservative lifetime policy: hot-unload is not supported by design.
+       DriverUnload stays NULL and the mapped image remains until reboot. */
+    driver_object->DriverUnload = NULL;
+    g_device_object->Flags &= ~DO_DEVICE_INITIALIZING;
+    result->device_created = 1;
 
-static NTSTATUS FinishAuthorizationTeardown(BOOLEAN from_work_item)
-{
-	/* The revocation owner unpublishes the hook before draining its entrants. */
-	UnpublishAuthorizationHook();
-	NTSTATUS status = UnregisterProcessNotify();
-	CompleteAuthorizationRundown();
-	CleanupAuthorizationResources();
-	if (!from_work_item && InterlockedCompareExchange(&g_revoke_work_queued,
-		FALSE, FALSE))
-		KeWaitForSingleObject(&g_revoke_work_done, Executive, KernelMode, FALSE, NULL);
-	if (NT_SUCCESS(status) && !NT_SUCCESS((NTSTATUS)g_notify_unregister_status))
-		status = (NTSTATUS)g_notify_unregister_status;
-	InterlockedExchange(&g_teardown_status, status);
-	if (!NT_SUCCESS(status))
-	{
-		if (!from_work_item)
-			KeSetEvent(&g_revoke_work_done, IO_NO_INCREMENT, FALSE);
-		return status;
-	}
-	if (!from_work_item)
-	{
-		InterlockedExchange(&g_authorization_state, AUTH_STATE_IDLE);
-		KeSetEvent(&g_revoke_work_done, IO_NO_INCREMENT, FALSE);
-	}
-	return STATUS_SUCCESS;
-}
-
-static NTSTATUS ShutdownAuthorization(BOOLEAN from_work_item)
-{
-	LONG state = InterlockedCompareExchange(&g_authorization_state,
-		AUTH_STATE_REVOKING, AUTH_STATE_ACTIVE);
-	if (state == AUTH_STATE_INSTALLING)
-	{
-		InterlockedExchange(&g_revoke_requested, TRUE);
-		return STATUS_DEVICE_BUSY;
-	}
-	if (state != AUTH_STATE_ACTIVE)
-	{
-		/* Another caller owns REVOKING; only that caller may teardown. */
-		if (state == AUTH_STATE_REVOKING)
-		{
-			if (from_work_item)
-				return STATUS_DEVICE_BUSY;
-			KeWaitForSingleObject(&g_revoke_work_done, Executive,
-				KernelMode, FALSE, NULL);
-			NTSTATUS teardown_status = (NTSTATUS)g_teardown_status;
-			if (NT_SUCCESS(teardown_status))
-				InterlockedExchange(&g_authorization_state, AUTH_STATE_IDLE);
-			return teardown_status;
-		}
-		if (state == AUTH_STATE_IDLE &&
-			InterlockedCompareExchange(&g_revoke_work_initialized, TRUE, TRUE) &&
-			!KeReadStateEvent(&g_revoke_work_done))
-		{
-			if (from_work_item)
-				return STATUS_DEVICE_BUSY;
-			KeWaitForSingleObject(&g_revoke_work_done, Executive,
-				KernelMode, FALSE, NULL);
-		}
-		return STATUS_SUCCESS;
-	}
-	/* The ACTIVE->REVOKING winner is the sole teardown owner. */
-	KeResetEvent(&g_revoke_work_done);
-	return FinishAuthorizationTeardown(from_work_item);
-}
-
-static VOID RevokeWorkItem(PVOID context)
-{
-	UNREFERENCED_PARAMETER(context);
-	(void)ShutdownAuthorization(TRUE);
-	InterlockedExchange(&g_revoke_work_queued, FALSE);
-	/* Final operation: no worker-owned state or image access follows this. */
-	KeSetEvent(&g_revoke_work_done, IO_NO_INCREMENT, FALSE);
-}
-
-static VOID ProcessNotify(PEPROCESS process, HANDLE process_id,
-	PPS_CREATE_NOTIFY_INFO create_info)
-{
-	UNREFERENCED_PARAMETER(process_id);
-
-	if (!create_info && process == g_authorized_process)
-	{
-		InterlockedExchange(&g_revoke_requested, TRUE);
-		/* Removal is deferred because a notify callback must not remove itself. */
-		QueueRevocationWork();
-	}
-}
-
-static NTSTATUS ValidateCommand(PVOID address, Command* command, BOOLEAN* handshake)
-{
-	NTSTATUS status;
-	PEPROCESS caller_process = PsGetCurrentProcess();
-	PEPROCESS authorized_process = g_authorized_process;
-
-	if (!authorized_process || caller_process != authorized_process)
-	{
-		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
-			"ReadWriteDriver: unauthorized process %p (expected %p)\r\n",
-			caller_process, authorized_process);
-		return STATUS_ACCESS_DENIED;
-	}
-
-	status = CopyCommandFromKernel(address, command);
-	if (!NT_SUCCESS(status))
-		return status;
-
-	*handshake = (command->op == COMMAND_ISLOADED && command->auth_token == 0);
-	if (command->auth_token != g_session_token && !*handshake)
-	{
-		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
-			"ReadWriteDriver: invalid session token from %p\r\n", caller_process);
-		return STATUS_ACCESS_DENIED;
-	}
-
-	if (command->magic != COMMAND_MAGIC)
-		return STATUS_INVALID_PARAMETER;
-	if (command->version != PROTOCOL_VERSION)
-		return STATUS_REVISION_MISMATCH;
-	if (command->size != sizeof(Command))
-		return STATUS_INFO_LENGTH_MISMATCH;
-	if (command->reserved != 0 || command->reserved_result != 0)
-		return STATUS_INVALID_PARAMETER;
-	if ((command->flags & ~COMMAND_FLAG_WRITE) != 0)
-		return STATUS_INVALID_PARAMETER;
-	if ((command->op == COMMAND_ISLOADED || command->op == COMMAND_GETPROCPID) &&
-		command->flags != 0)
-		return STATUS_INVALID_PARAMETER;
-	if (command->op != COMMAND_READWRITE && command->op != COMMAND_GETPROCPID &&
-		command->op != COMMAND_ISLOADED)
-		return STATUS_INVALID_DEVICE_REQUEST;
-	if (!IsUserRange(command->user_result, sizeof(Command)))
-		return STATUS_ACCESS_VIOLATION;
-
-	return STATUS_SUCCESS;
-}
-
-__int64 __fastcall hook(__int64 a, __int64 b, __int64 c)
-{
-	if (!ExAcquireRundownProtection(&g_authorization_rundown))
-		return 0;
-
-	/* Read the original only while rundown protects the mapped image. */
-	t_Win32FreePool original = Win32FreePool;
-	if (InterlockedCompareExchange(&g_authorization_state,
-		AUTH_STATE_ACTIVE, AUTH_STATE_ACTIVE) != AUTH_STATE_ACTIVE)
-		return CallOriginalAndRelease(original, a, b, c);
-
-	PVOID command_address = (PVOID)(ULONG_PTR)a;
-	Command command = { 0 };
-	BOOLEAN handshake = FALSE;
-	NTSTATUS status = ValidateCommand(command_address, &command, &handshake);
-	if (!NT_SUCCESS(status))
-	{
-		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
-			"ReadWriteDriver: command rejected: 0x%08X\r\n", status);
-		return CallOriginalAndRelease(original, a, b, c);
-	}
-
-	if (handshake)
-	{
-		status = CompleteCommand(command.user_result, STATUS_SUCCESS, 0, TRUE);
-		return CallOriginalAndRelease(original, a, b, c);
-	}
-
-	if (command.op == COMMAND_READWRITE)
-	{
-		SIZE_T length = 0;
-		SIZE_T transferred = 0;
-
-		if (command.flags != 0 && command.flags != COMMAND_FLAG_WRITE)
-			status = STATUS_INVALID_PARAMETER;
-		else if (command.len == 0 || command.len > READWRITE_MAX_OPERATION_SIZE ||
-			command.len > (uint64_t)(SIZE_T)-1)
-			status = STATUS_INVALID_BUFFER_SIZE;
-		else if (command.flags & COMMAND_FLAG_WRITE)
-		{
-			length = (SIZE_T)command.len;
-			status = IsUserRange(command.src, command.len) &&
-				IsUserRange(command.dst, command.len)
-				? STATUS_SUCCESS : STATUS_ACCESS_VIOLATION;
-		}
-		else
-		{
-			length = (SIZE_T)command.len;
-			status = IsUserRange(command.src, command.len) &&
-				IsUserRange(command.dst, command.len)
-				? STATUS_SUCCESS : STATUS_ACCESS_VIOLATION;
-		}
-
-		if (NT_SUCCESS(status))
-		{
-			FixRegister();
-			if (command.flags & COMMAND_FLAG_WRITE)
-				status = WriteProcessMemory((HANDLE)(ULONG_PTR)command.pid,
-					(PVOID)(ULONG_PTR)command.dst,
-					(PVOID)(ULONG_PTR)command.src, length, &transferred);
-			else
-				status = ReadProcessMemory((HANDLE)(ULONG_PTR)command.pid,
-					(PVOID)(ULONG_PTR)command.src,
-					(PVOID)(ULONG_PTR)command.dst, length, &transferred);
-		}
-
-		NTSTATUS operation_status = status;
-		status = CompleteCommand(command.user_result, operation_status, transferred, FALSE);
-		return CallOriginalAndRelease(original, a, b, c);
-	}
-
-	if (command.op == COMMAND_GETPROCPID)
-	{
-		PEPROCESS process = NULL;
-		PVOID peb = NULL;
-		NTSTATUS lookup_status = PsLookupProcessByProcessId(
-			(HANDLE)(ULONG_PTR)command.pid, &process);
-
-		if (NT_SUCCESS(lookup_status))
-		{
-			peb = PsGetProcessPeb(process);
-			ObDereferenceObject(process);
-		}
-
-		status = CompleteCommand(command.user_result, lookup_status,
-			(uint64_t)(ULONG_PTR)peb, FALSE);
-		return CallOriginalAndRelease(original, a, b, c);
-	}
-
-	status = CompleteCommand(command.user_result, STATUS_INVALID_DEVICE_REQUEST, 0, FALSE);
-	return CallOriginalAndRelease(original, a, b, c);
-}
-
-uintptr_t GetPIDByName(char* imagename)
-{
-	NTSTATUS status;
-	PRTL_PROCESS_MODULES ModuleInfo;
-
-	if (!imagename)
-		return 0;
-
-	ModuleInfo = ExAllocatePool2(POOL_FLAG_PAGED, 1024 * 1024, 'mIpR');
-
-	if (!ModuleInfo)
-	{
-#ifdef DEBUG
-		DbgPrintEx(DPFLTR_IHVDRIVER_ID, -1, "Fail\r\n");
-#endif
-		return 0;
-	}
-
-	if (!NT_SUCCESS(status = ZwQuerySystemInformation(11, ModuleInfo, 1024 * 1024, NULL))) // 11 = SystemModuleInformation
-	{
-#ifdef _DEBUG
-		DbgPrintEx(DPFLTR_IHVDRIVER_ID, -1, "Fail 2\r\n");
-#endif
-		ExFreePool(ModuleInfo);
-		return 0;
-	}
-
-	for (ULONG i = 0; i < ModuleInfo->NumberOfModules; i++)
-	{
-		/*DbgPrintEx(DPFLTR_IHVDRIVER_ID, -1, "ImageBase: 0x%p\r\n", ModuleInfo->Modules[i].ImageBase);
-		DbgPrintEx(DPFLTR_IHVDRIVER_ID, -1, "Image Name: %s\r\n", ModuleInfo->Modules[i].FullPathName + ModuleInfo->Modules[i].OffsetToFileName);*/
-		if (!strcmp(ModuleInfo->Modules[i].FullPathName + ModuleInfo->Modules[i].OffsetToFileName, imagename))
-		{
-#ifdef _DEBUG
-			DbgPrintEx(DPFLTR_IHVDRIVER_ID, -1, "Found %s\r\n", imagename);
-#endif
-			uintptr_t imagebase = (uintptr_t)ModuleInfo->Modules[i].ImageBase;
-			ExFreePool(ModuleInfo);
-			return imagebase;
-		}
-
-	}
-
-	ExFreePool(ModuleInfo);
-
-	return 0;
-}
-
-#define WINDOWS_21H1       19043
-
-typedef struct _WIN32K_OFFSET_ENTRY
-{
-	ULONG BuildNumber;
-	uintptr_t Win32FreePoolOffset;
-} WIN32K_OFFSET_ENTRY;
-
-static const WIN32K_OFFSET_ENTRY Win32kOffsets[] =
-{
-	{ WINDOWS_21H1,     0x2B3C90 },
-};
-
-static NTSTATUS GetWin32FreePoolOffset(uintptr_t* offset)
-{
-	RTL_OSVERSIONINFOW version = { 0 };
-	ULONG i;
-
-	if (!offset)
-		return STATUS_INVALID_PARAMETER;
-
-	*offset = 0;
-	version.dwOSVersionInfoSize = sizeof(version);
-	if (!NT_SUCCESS(RtlGetVersion(&version)))
-		return STATUS_NOT_SUPPORTED;
-	if (version.dwBuildNumber < WINDOWS_21H1)
-		return STATUS_NOT_SUPPORTED;
-
-	for (i = 0; i < RTL_NUMBER_OF(Win32kOffsets); ++i)
-	{
-		if (Win32kOffsets[i].BuildNumber != version.dwBuildNumber)
-			continue;
-
-		if (!Win32kOffsets[i].Win32FreePoolOffset)
-			return STATUS_NOT_SUPPORTED;
-
-		*offset = Win32kOffsets[i].Win32FreePoolOffset;
-		return STATUS_SUCCESS;
-	}
-
-	// Do not apply an offset from another kernel build.
-	return STATUS_NOT_SUPPORTED;
-}
-
-NTSTATUS EntryPoint(DWORD32 pid)
-{
-	if (pid == 0)
-		return ShutdownAuthorization(FALSE);
-
-	for (;;)
-	{
-		LONG state = InterlockedCompareExchange(&g_authorization_state,
-			AUTH_STATE_IDLE, AUTH_STATE_IDLE);
-		if (state == AUTH_STATE_IDLE)
-		{
-			if (InterlockedCompareExchange(&g_revoke_work_initialized,
-				TRUE, TRUE) && !KeReadStateEvent(&g_revoke_work_done))
-			{
-				KeWaitForSingleObject(&g_revoke_work_done, Executive,
-					KernelMode, FALSE, NULL);
-				continue;
-			}
-			if (InterlockedCompareExchange(&g_authorization_state,
-				AUTH_STATE_INSTALLING, AUTH_STATE_IDLE) == AUTH_STATE_IDLE)
-				break;
-			continue;
-		}
-		if (state != AUTH_STATE_REVOKING)
-			return STATUS_DEVICE_BUSY;
-
-		KeWaitForSingleObject(&g_revoke_work_done, Executive,
-			KernelMode, FALSE, NULL);
-		NTSTATUS teardown_status = (NTSTATUS)g_teardown_status;
-		if (!NT_SUCCESS(teardown_status))
-			return teardown_status;
-		InterlockedCompareExchange(&g_authorization_state,
-			AUTH_STATE_IDLE, AUTH_STATE_REVOKING);
-	}
-
-	/* IDLE is reached only after completion; reinitialize subsequent cycles. */
-	if (InterlockedCompareExchange(&g_rundown_initialized, TRUE, FALSE) == FALSE)
-		ExInitializeRundownProtection(&g_authorization_rundown);
-	else
-		ExReInitializeRundownProtection(&g_authorization_rundown);
-	InterlockedExchange(&g_rundown_completed, FALSE);
-	InterlockedExchange(&g_notify_unregister_status, STATUS_SUCCESS);
-	InterlockedExchange(&g_revoke_requested, FALSE);
-	InterlockedExchange(&g_revoke_work_queued, FALSE);
-	if (InterlockedCompareExchange(&g_revoke_work_initialized, TRUE, FALSE) == FALSE)
-		KeInitializeEvent(&g_revoke_work_done, NotificationEvent, TRUE);
-	ExInitializeWorkItem(&g_revoke_work_item, RevokeWorkItem, NULL);
-	if (!ExAcquireRundownProtection(&g_authorization_rundown))
-	{
-		if (InterlockedCompareExchange(&g_authorization_state,
-			AUTH_STATE_REVOKING, AUTH_STATE_INSTALLING) == AUTH_STATE_INSTALLING)
-		{
-			KeResetEvent(&g_revoke_work_done);
-			return FinishAuthorizationTeardown(FALSE);
-		}
-		return STATUS_DEVICE_BUSY;
-	}
-
-	g_authorized_pid = (HANDLE)(ULONG_PTR)pid;
-	GenerateSessionToken();
-
-#ifdef _DEBUG
-	DbgPrintEx(DPFLTR_IHVDRIVER_ID, -1, "Entry point of ReadWriteDriver %d\r\n", pid);
-#endif
-
-	PEPROCESS out = NULL;
-	NTSTATUS status = PsLookupProcessByProcessId((HANDLE)(ULONG_PTR)pid, &out);
-	if (!NT_SUCCESS(status) || !out)
-		goto install_failure;
-
-	g_authorized_process = out;
-	if (!g_process_notify_registered)
-	{
-		status = PsSetCreateProcessNotifyRoutineEx(ProcessNotify, FALSE);
-		if (!NT_SUCCESS(status))
-			goto install_failure;
-		g_process_notify_registered = TRUE;
-	}
-
-	KAPC_STATE state;
-	KeStackAttachProcess(out, &state);
-
-	uintptr_t win32k_imagebase = GetPIDByName("win32kbase.sys");
-	if (!win32k_imagebase)
-	{
-		status = STATUS_NOT_FOUND;
-		KeUnstackDetachProcess(&state);
-		goto install_failure;
-	}
-
-	uintptr_t win32freepool_offset = 0;
-	status = GetWin32FreePoolOffset(&win32freepool_offset);
-	if (!NT_SUCCESS(status))
-	{
-		KeUnstackDetachProcess(&state);
-		goto install_failure;
-	}
-
-	uintptr_t ptr_win32freepool = win32k_imagebase + win32freepool_offset; // See win32kbase!NtUserSetSysColors. The ptr we swap is a global that
-	PVOID original_pool = InterlockedCompareExchangePointer(
-		(PVOID volatile*)ptr_win32freepool, NULL, NULL);
-	if (!original_pool)
-	{
-		KeUnstackDetachProcess(&state);
-		status = STATUS_NOT_FOUND;
-		goto install_failure;
-	}
-
-	Win32FreePool = (t_Win32FreePool)original_pool;
-	InterlockedExchangePointer((PVOID volatile*)&g_win32freepool_slot,
-		(PVOID)ptr_win32freepool);
-	PVOID exchanged_pool = InterlockedExchangePointer(
-		(PVOID volatile*)ptr_win32freepool, (PVOID)&hook);
-	if (exchanged_pool != original_pool)
-	{
-		InterlockedExchangePointer((PVOID volatile*)ptr_win32freepool, exchanged_pool);
-		KeUnstackDetachProcess(&state);
-		status = STATUS_DEVICE_BUSY;
-		goto install_failure;
-	}
-
-	KeUnstackDetachProcess(&state);
-	if (InterlockedCompareExchange(&g_revoke_requested, FALSE, FALSE))
-	{
-		status = STATUS_PROCESS_IS_TERMINATING;
-		goto install_failure;
-	}
-
-	if (InterlockedCompareExchange(&g_authorization_state,
-		AUTH_STATE_ACTIVE, AUTH_STATE_INSTALLING) != AUTH_STATE_INSTALLING)
-	{
-		status = STATUS_PROCESS_IS_TERMINATING;
-		goto install_failure;
-	}
-	ExReleaseRundownProtection(&g_authorization_rundown);
-
-	/* A notify can set the flag while INSTALLING; re-check after publishing ACTIVE. */
-	if (InterlockedCompareExchange(&g_revoke_requested, FALSE, FALSE) ||
-		InterlockedCompareExchange(&g_authorization_state,
-			AUTH_STATE_ACTIVE, AUTH_STATE_ACTIVE) != AUTH_STATE_ACTIVE)
-	{
-		status = STATUS_PROCESS_IS_TERMINATING;
-		{
-			NTSTATUS cleanup_status = ShutdownAuthorization(FALSE);
-			return NT_SUCCESS(cleanup_status) ? status : cleanup_status;
-		}
-	}
-
-	return STATUS_SUCCESS;
-
-install_failure:
-	ExReleaseRundownProtection(&g_authorization_rundown);
-	if (InterlockedCompareExchange(&g_authorization_state,
-		AUTH_STATE_REVOKING, AUTH_STATE_INSTALLING) != AUTH_STATE_INSTALLING)
-		return status;
-	{
-		KeResetEvent(&g_revoke_work_done);
-		NTSTATUS teardown_status = FinishAuthorizationTeardown(FALSE);
-		return NT_SUCCESS(teardown_status) ? status : teardown_status;
-	}
+done:
+    result->status = (int32_t)status;
+    return status;
 }

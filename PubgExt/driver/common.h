@@ -5,6 +5,4 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "command_protocol.h"
-
 #endif // PUBGEXT_DRIVER_COMMON_H

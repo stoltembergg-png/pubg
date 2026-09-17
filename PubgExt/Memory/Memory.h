@@ -101,15 +101,6 @@ public:
 	uintptr_t GetImportTableAddress(std::string import, std::string process, std::string module);
 
 	/**
-	 * \brief This fixes the CR3 fuckery that EAC does.
-	 * It fixes it by iterating over all DTB's that exist within your system and looks for specific ones
-	 * that nolonger have a PID assigned to them, aka their pid is 0
-	 * it then puts it in a vector to later try each possible DTB to find the DTB of the process.
-	 * NOTE: Using FixCR3 requires you to have symsrv.dll, dbghelp.dll and info.db
-	 */
-	bool FixCr3();
-
-	/**
 	 * \brief Dumps the process memory at address (requires to be a valid PE Header) to the path
 	 * \param address the address to the PE Header(BaseAddress)
 	 * \param path the path where you wanna save dump to

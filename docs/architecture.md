@@ -63,95 +63,152 @@ Driver/Memory -> Engine -> Actors -> SharedState -> ESP -> Radar
 Na prática, ESP e Radar são renderizados no frame, enquanto o Aimbot é
 acionado após a publicação de uma atualização pelo `MemoryLoop`.
 
-## ReadWriteDriver - Arquitetura Kernel
+## ReadWriteDriver — arquitetura device + IOCTL
 
-O transporte de memória usado pelo `PubgExt` é implementado em
-`PubgExt/driver/driver_interface_v3.*`. Ele não usa um device handle: a ponte
-em user mode resolve `NtUserSetSysColors` em `win32u.dll` e envia a estrutura
-`Command` pelo caminho da função hookeada.
-
-O fluxo de carregamento e execução é:
+O transporte de memória usado pelo `PubgExt` é um device WDM legado. O driver
+cria o device `\Device\PubgExtRw` e o symlink `\DosDevices\PubgExtRw`, aberto
+em user mode como `\\.\PubgExtRw`. O fluxo de dados é:
 
 ```text
-PubgExt (UM) -> driver_interface_v3 -> NtUserSetSysColors -> ReadWriteDriver.sys
+PubgExt (UM)
+  -> CreateFile("\\\\.\\PubgExtRw")
+  -> DeviceIoControl (AUTH/CAPS/READ/WRITE)
+  -> ReadWriteDriver.sys
+  -> cópia virtual com attach ao processo
+  -> processo-alvo
 ```
 
-O mapper carrega `ReadWriteDriverMapper.sys`, que reserva páginas não paginadas
-e mapeia manualmente `ReadWriteDriver.sys`. Durante a inicialização, o driver
-localiza `win32kbase.sys` e usa o endereço global em
-`win32kbase.sys + 0x2B3C90` (associado a `NtUserSetSysColors`) para instalar o
-hook. O hook interpreta a `Command`, executa a operação e restaura o fluxo
-normal da função original.
+O device é criado com `IoCreateDeviceSecure`, `FILE_DEVICE_SECURE_OPEN` e o
+SDDL `D:P(A;;GA;;;SY)(A;;GA;;;BA)`. Apenas `SYSTEM` e `Administrators` têm
+acesso; portanto, o app precisa ser executado elevado. Não há fallback para
+uma ACL insegura.
+
+O mapper carrega `ReadWriteDriverMapper.sys`, que mapeia manualmente a imagem
+do payload. A ordem real do preflight é: obter a versão do sistema e comparar o
+build com a versão do perfil; recusar HVCI ativo; localizar o
+`ntoskrnl` carregado; validar sua identidade (TDS, `SizeOfImage`, checksum,
+GUID+Age do PDB e tamanho do arquivo); confirmar que existe um perfil gerado;
+validar que os três RVAs do perfil estão em seções executáveis; e só então
+validar o layout PE do payload e o entry point. Depois da alocação e da
+proteção da imagem, o mapper copia headers e seções, aplica relocations,
+resolve a IAT e chama o entry point. Em uma falha de mapeamento, a alocação da
+imagem é liberada; a existência e o ciclo de vida do device precisam continuar
+sendo validados em VM.
+
+`tools/profiles/extract_profile.py` gera, a partir dos binários de uma máquina,
+um JSON de evidências e `tools/profiles/generated/profiles_generated.h`. O
+header gerado é a fonte única consumida pelo mapper. Para o perfil atual, os
+RVAs usados pelo mapper são `MmAllocateIndependentPages` `0xAA42A0`,
+`MmSetPageProtection` `0x4E5EE0` e `MmFreeIndependentPages` `0x2065C0`.
+Cada máquina e cada atualização do Windows exigem um novo perfil revisado; isso
+não é suporte genérico por build nem permite nearest-match.
+
+O perfil/tooling também carrega identidades de `win32kbase`, `win32kfull` e
+`win32k`, além de campos de `EPROCESS`. Esses dados são evidência da análise de
+RE e podem aparecer no JSON/header, mas não são gate nem dependência de runtime
+do transporte atual; o mapper usa a identidade do `ntoskrnl` e os três RVAs
+gerados acima.
 
 ### Caminhos alternativos de carga
 
-`tools/kdmapper.exe` é uma opção externa de manual mapping para carregar o
-`ReadWriteDriver.sys` sem compilar ou usar o `ReadWriteDriverMapper.sys`
-interno. O mapper interno faz parte da arquitetura documentada e do fluxo
-oficial do projeto, enquanto o `kdmapper.exe` é um utilitário genérico mantido
-fora desse fluxo. A alternativa externa pode ser mais rápida para testes e
-quando o mapper não estiver disponível, mas exige execução como administrador,
-o modo de testes de assinatura desabilitado e não oferece a mesma integração,
-controle de versão ou previsibilidade do mapper interno.
+`tools/kdmapper-src/` é a fonte vendorada do loader upstream
+`TheCruZ/kdmapper`, commit
+`48ac931d87372702a23c6f34ee7b8440787d9fc7`, sob MIT, com atribuição em
+`tools/kdmapper-src/VENDORING.md`. A fonte compila em `Release|x64`; o artefato
+registrado tem 154112 bytes. Seus padrões e assinaturas foram validados para o
+kernel local `10.0.26100.9457`, incluindo as tabelas de PiDDB, WdFilter e a
+lista de hashes de CI descritas em `VENDORING.md`. A fonte é a referência
+auditável para build e correções. `tools/kdmapper.exe` é apenas o binário
+legado, opaco e não auditado.
 
-### Protocolo de comandos e autenticação
+Esse loader é o vetor BYOVD que usa `iqvw64e.sys` v1.03.0.7. A rota externa
+exige blocklist de drivers vulneráveis desabilitada e execução como
+administrador, somente em VM autorizada e isolada. No fluxo do projeto, ele
+carrega o `ReadWriteDriverMapper.sys`; esse mapper interno é quem mapeia o
+payload e aplica o ABI do device. A rota externa não substitui a validação do
+mapper interno nem transforma a cobertura local em suporte genérico para outras
+builds.
 
-O header canônico compartilhado é
-`PubgExt/driver/command_protocol.h`. A estrutura `Command` tem **96 bytes**;
-seu campo `status` fica no offset 88. Ela contém `magic`, `version`, `size`,
-`auth_token`, operação, PID, endereços, `user_result`, `status`, `result` e
-campos reservados. Um `static_assert` verifica o layout binário; a ordem dos
-campos e os ponteiros de 64 bits precisam permanecer idênticos entre user mode
-e kernel.
+### Protocolo IOCTL e autenticação
 
-A autorização é vinculada ao `PEPROCESS` retido, eliminando a tomada de uma
-sessão por reuso de PID. O token de sessão, criado por `ExUuidCreate` e
-entregue somente no handshake, é uma camada **suplementar**, não uma
-autenticação forte. A ordem de validação é: chamador → token → magic → version
-→ size.
+O contrato canônico está em `PubgExt/driver/ioctl_protocol.h` e usa
+`stdint.h`/tipos de tamanho fixo, com `static_assert` para tamanhos e offsets.
+Todos os IOCTLs usam `METHOD_BUFFERED`, `DeviceType 0x8337` e protocolo major
+2, minor 0. Os códigos de função são `AUTH` (`0x800`), `QUERY_CAPS`
+(`0x801`), `READ` (`0x802`) e `WRITE` (`0x803`).
 
-Os comandos são:
+Os layouts públicos são:
 
-- `COMMAND_READWRITE` (`0xB16B00B5`): lê ou escreve memória, conforme `rw`;
-- `COMMAND_GETPROCPID` (`0xBADA55`): obtém informações do processo alvo;
-- `COMMAND_ISLOADED` (`0x69420`): identifica o estado de carregamento.
+- `RequestHeader`: 32 bytes;
+- `ResponseHeader`: 40 bytes;
+- request de READ: 56 bytes;
+- request fixo de WRITE: 56 bytes, seguido pelos dados;
+- response de `QUERY_CAPS`: 48 bytes.
 
-As leituras e escritas usam `physmem`: o driver obtém o CR3 do processo, traduz
-endereços virtuais para físicos e acessa a memória física em blocos de página.
-Isso mantém o caminho de memória separado da camada de renderização e é
-encapsulado pela interface `DriverInterfaceV3`.
+O magic é `0x50554247`, o limite por operação é 16 MiB e a cópia é feita em
+chunks de 64 KiB. Major incompatível retorna `STATUS_REVISION_MISMATCH`.
+Não existe `Command` de 96 bytes, token devolvido pelo driver ou autorização
+por PID.
 
-### Hardening aprovado
+No `IRP_MJ_CREATE`, o driver cria uma sessão por `FILE_OBJECT`. O opener deve
+estar em `UserMode`; o processo é obtido com `IoGetRequestorProcess`, seu
+caminho completo de imagem é resolvido e comparado à allowlist. Falha ao
+resolver o caminho também falha a abertura, sem fallback para basename. O
+`PEPROCESS` é referenciado pela sessão e comparado em cada IOCTL.
 
-- `FixIAT` é estrito e falha quando um import não é resolvido;
-- VA de kernel é rejeitada, há limite de 16 MiB por operação, checagem de
-  overflow e rejeição de flags/reserved desconhecidos;
-- `ProbeForRead`/`ProbeForWrite` são usados somente para VA user-mode genuína;
-- o canal de retorno usa `user_result`;
-- a máscara de CR3 é `~0xFFF`;
-- as máscaras físicas foram corrigidas: PMASK usa os bits 12..51, a página de
-  2 MiB usa 21 bits mais PAT, a página de 1 GiB usa PS no PDPTE e o PTE final
-  verifica o bit Present;
-- `MmCopyMemory` nunca recebe como destino memória user-mode paginável;
-- `Win32FreePool` é chamado em todos os caminhos;
-- o gate de build ocorre antes do acesso a offsets internos do `ntoskrnl`;
-- o teardown tem dono único via CAS e o reuso chama
-  `ExReInitializeRundownProtection`;
-- o restore do slot usa `InterlockedCompareExchangePointer` com checagem de
-  dono;
-- o mapper propaga o `NTSTATUS` do payload e **não libera a imagem quando o
-  teardown falha**.
+O `DispatchDeviceControl` primeiro rejeita IOCTL desconhecido com
+`STATUS_INVALID_DEVICE_REQUEST`. Para um código conhecido, verifica
+`RequestorMode`, adquire a sessão sob `KeEnterCriticalRegion` e push lock
+pareados, confere a sessão e a identidade do chamador e exige o buffer fixo
+mínimo. Em `AUTH` e `QUERY_CAPS`, valida então o header na ordem magic,
+major/minor, `struct_size`, flags e `reserved`, e só depois os tamanhos exatos
+do IRP. Em `READ`, verifica primeiro o tamanho exato da entrada, depois o
+header, os limites/tamanhos da saída, campos reservados, PID e faixa de VA, e
+por fim faz o lookup do processo. Em `WRITE`, verifica primeiro o mínimo do
+payload fixo, depois o header, o tamanho fixo mais os dados, a saída, campos
+reservados, PID e faixa de VA, e então o lookup. No lookup, o processo é
+referenciado e um alvo WOW64 é rejeitado; WOW64 é rejeitado pelo protocolo v2.
+
+Também são checados os overflows de `addr + len` e de `fixed + len`. VA de
+kernel é rejeitada (o último byte deve ser menor ou igual a
+`MM_HIGHEST_USER_ADDRESS`). Depois que os campos básicos tornam uma resposta
+possível, falhas de lookup são refletidas em `operation_status`.
+
+### Cópia virtual
+
+READ e WRITE usam cópia virtual em
+`ReadWriteDriver/ReadWriteDriver/virtual_copy.c`: `KeStackAttachProcess`,
+`ProbeForRead`/`ProbeForWrite` e cópia em `PASSIVE_LEVEL`. A referência obtida
+por `PsLookupProcessByProcessId` é propriedade explícita de
+`VirtualCopyProcess`: o callee a consome em `__finally`, inclusive em retornos
+antecipados, e garante detach quando o attach ocorreu. A cópia divide cada
+chunk de 64 KiB nas fronteiras de página; `transferred` conta exatamente os
+bytes concluídos até a página que falhou. Não há page-walking físico, acesso a
+CR3 ou offsets de `EPROCESS` no caminho de runtime.
+
+### Remoções arquiteturais
+
+Foram removidos o transporte anterior, `physmem.c/.h`, `assembly.asm`, process
+notify, work item, rundown do transporte, token de sessão, `user_result`, o
+acesso por CR3 e o handshake por PID no mapper. Isso não significa que toda
+evidência de offsets foi apagada: o perfil/tooling ainda registra as identidades
+dos módulos gráficos e campos de `EPROCESS` para análise de RE, sem usá-los como
+gate ou dependência do runtime. PID e base de módulo são obtidos pelo app com
+Toolhelp32; não pelo driver.
 
 ### Plataforma, limitações e requisitos
 
-- A plataforma suportada é **Windows 10 21H1, build 19043, exclusivamente**.
-  Essa restrição é reforçada pelo payload e pelo gate no mapper, que retorna
-  `STATUS_NOT_SUPPORTED` em outras builds.
-- O deslocamento `win32kbase+0x2B3C90` é hardcoded para a build suportada.
-- O carregamento de driver exige um ambiente de testes com **test signing**
-  habilitado e privilégios apropriados.
+- O suporte é definido pelo **perfil exato da identidade do `ntoskrnl`**, não
+  por um número genérico de build do Windows. O perfil atual identifica o kernel
+  `10.0.26100.9457`; o host do owner é build `26200.9457`.
+- O carregamento exige um ambiente de testes autorizado, test signing quando
+  aplicável e privilégios apropriados. O app também precisa de elevação para
+  abrir o device.
 - **Secure Boot** pode impedir o carregamento de imagens não assinadas; ele
   precisa ser considerado ao preparar o ambiente de teste.
+- `DriverUnload = NULL`: hot-unload não é suportado por desenho. A imagem
+  permanece até o reboot; feche o app para encerrar a sessão, mas não tente
+  descarregar o driver.
 - O driver e o `PubgExt` são soluções independentes e devem ser compilados e
   validados separadamente.
 
@@ -192,14 +249,13 @@ self-hosted runner.
 ## Riscos e limitações
 
 Consulte o documento central de riscos residuais em
-[`docs/known-issues.md`](known-issues.md). O teardown e o unload não devem ser
-considerados seguros enquanto os problemas críticos listados ali não forem
-resolvidos por redesenho arquitetural.
+[`docs/known-issues.md`](known-issues.md), incluindo o que ainda não foi
+validado em VM e a proibição de hot-unload.
 
 ## Como manter atualizado
 
-Ao alterar o SDK ou atualizar a versão do jogo, revise os offsets e regenere o
-header correspondente com `tools/dump_offsets.py`. Use a opção `--check` para
-verificar se o header está sincronizado antes de abrir um pull request. Depois,
-confirme o build local ou acompanhe o workflow `build.yml` para validar a
-solução e a configuração CMake.
+Ao mudar a máquina ou a atualização do Windows, obtenha um novo dump e gere um
+perfil com `tools/profiles/extract_profile.py`. Cada máquina/atualização exige
+um perfil novo; não selecione o perfil mais próximo. Depois de recompilar o
+driver, regenere o payload e confirme o build local conforme o [guia de
+teste](testing.md).

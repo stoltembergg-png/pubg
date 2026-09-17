@@ -19,13 +19,18 @@ driver.
 - Windows Driver Kit (WDK) correspondente ao Windows SDK, para compilar o
   driver;
 - Driver de kernel compatível, carregado e configurado para o ambiente de teste;
+- execução do app como administrador: o device `\\.\PubgExtRw` aceita somente
+  `SYSTEM` e `Administrators`;
 - Discord instalado e com o overlay habilitado, caso o renderizador do Discord
   seja utilizado.
 
 ## Plataforma suportada
 
-O suporte é exclusivo para **Windows 10 21H1, build 19043**. O payload e o
-mapper rejeitam outras builds.
+O suporte é definido pelo **perfil exato da identidade do `ntoskrnl`**, não por
+um número genérico de build. O perfil atual é o kernel `10.0.26100.9457` no
+host build `26200.9457`; o payload e o mapper rejeitam identidades sem perfil
+exato. Cada máquina e cada atualização exigem um perfil novo; o projeto não é
+suporte genérico para builds não perfiladas.
 
 ## Como buildar
 
@@ -59,9 +64,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ReadWriteDriver/tools/embed_
 
 O script usa, por padrão, `ReadWriteDriver/x64/Release/ReadWriteDriver.sys`.
 
-Como alternativa rápida para carregar um `.sys`, use o utilitário externo
-`tools/kdmapper.exe`. Ele não substitui o fluxo oficial do projeto e requer
-ambiente de testes configurado e privilégios de administrador.
+O driver expõe `\\.\PubgExtRw` por `CreateFile`/`DeviceIoControl` para AUTH,
+CAPS, READ e WRITE. `DriverUnload = NULL`: hot-unload não é suportado; feche o
+app e reinicie a máquina quando for necessário encerrar o ciclo do driver.
+
+Ao atualizar a máquina ou o Windows, faça um novo perfil com
+`tools/profiles/extract_profile.py`, compile o driver para essa identidade e
+regenere o payload. Não use o perfil mais próximo. Para o procedimento de
+validação do loader e do driver, consulte [`docs/testing.md`](docs/testing.md).
 
 ## Estrutura de pastas
 
@@ -74,7 +84,30 @@ ambiente de testes configurado e privilégios de administrador.
 - `PubgExt/driver/`: interface com o driver de kernel;
 - `Include/` e `Lib/`: diretórios reservados para headers e bibliotecas locais;
 - `docs/`: documentação técnica do projeto;
+- `tools/profiles/`: extrator e perfis gerados de identidade do kernel;
+- `tools/kdmapper-src/`: fonte vendorada e auditável do loader;
 - `tools/`: ferramentas auxiliares, incluindo `tools/dump_offsets.py`.
+
+## Perfil do kernel e loader
+
+Execute `tools/profiles/extract_profile.py` na própria máquina testada para
+gerar o JSON de identidades (TDS, `SizeOfImage`, checksum e GUID+Age) e os RVAs
+de `ntoskrnl` usados pelo mapper. Revise o JSON e regenere
+`tools/profiles/generated/profiles_generated.h`; esse header é a fonte única
+compilada pelo mapper. As identidades de `win32kbase`, `win32kfull`, `win32k` e
+campos de `EPROCESS` que também aparecem no perfil são evidência de RE, não gate
+nem dependência de runtime.
+
+O loader de referência é a fonte vendorada em `tools/kdmapper-src/`, upstream
+`TheCruZ/kdmapper` no commit
+`48ac931d87372702a23c6f34ee7b8440787d9fc7`, sob MIT, com atribuição em
+`tools/kdmapper-src/VENDORING.md`. A fonte compila em Release x64 e o artefato
+registrado tem 154112 bytes; os padrões foram validados para o kernel local
+`10.0.26100.9457`, incluindo PiDDB, WdFilter e a lista de hashes de CI. O
+loader é o vetor BYOVD via `iqvw64e.sys` v1.03.0.7 e exige blocklist de drivers
+vulneráveis desabilitada e administrador, somente em VM autorizada. O
+`tools/kdmapper.exe` permanece como binário legado não auditado; use a fonte
+como referência para build e correção.
 
 ## Atualização de offsets
 
@@ -100,4 +133,4 @@ dados de terceiros.
 ## Riscos conhecidos
 
 Consulte [`docs/known-issues.md`](docs/known-issues.md) antes de qualquer teste
-do driver, especialmente sobre teardown e unload.
+do driver, especialmente sobre validação em VM e a proibição de unload.

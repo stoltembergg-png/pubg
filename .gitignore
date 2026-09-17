@@ -59,6 +59,18 @@ logs.txt
 *.pidb
 *.booproj
 
+# Compatibility profiles are small, reproducible build inputs and are
+# intentionally versioned. Do not ignore tools/profiles/generated/*.json or
+# tools/profiles/generated/profiles_generated.h.
+
+# kdmapper source is versioned; only its local build products are ignored.
+tools/kdmapper-src/Intermediate/
+tools/kdmapper-src/x64/
+
+# Python bytecode caches from the tooling (profiles/offsets)
+__pycache__/
+*.pyc
+
 # Local environment and secrets
 .env
 .env.*

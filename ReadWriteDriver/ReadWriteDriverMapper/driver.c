@@ -1,318 +1,505 @@
 #include "driver.h"
-#include <ntdef.h>
+#include "../../tools/profiles/generated/profiles_generated.h"
+#include "../ReadWriteDriver/payload_api.h"
+
 #include <ntifs.h>
-#include <intrin.h>
 #include <ntimage.h>
-#include <minwindef.h>
+#include <stdint.h>
 
-typedef PVOID(__fastcall* MmAllocateIndependentPages_t)(IN  SIZE_T NumberOfBytes, IN  ULONG Node);
-MmAllocateIndependentPages_t MmAllocateIndependentPages;
-typedef VOID(__fastcall* MmFreeIndependentPages_t)(IN PVOID BaseAddress, IN SIZE_T NumberOfBytes);
-MmFreeIndependentPages_t MmFreeIndependentPages;
+NTSYSAPI PIMAGE_NT_HEADERS NTAPI RtlImageNtHeader(PVOID image);
+NTSYSAPI PVOID NTAPI RtlImageDirectoryEntryToData(PVOID image,
+    BOOLEAN mapped_as_image, USHORT directory, PULONG size);
 
-typedef BOOLEAN(__fastcall* MmSetPageProtection_t)(__in_bcount(NumberOfBytes) PVOID VirtualAddress, __in SIZE_T NumberOfBytes, __in ULONG NewProtect);
-MmSetPageProtection_t MmSetPageProtection;
+typedef PVOID(__fastcall* MmAllocateIndependentPages_t)(SIZE_T, ULONG);
+typedef VOID(__fastcall* MmFreeIndependentPages_t)(PVOID, SIZE_T);
+typedef BOOLEAN(__fastcall* MmSetPageProtection_t)(PVOID, SIZE_T, ULONG);
 
-extern NTSYSAPI PVOID RtlPcToFileHeader(PVOID PcValue, PVOID* BaseOfImage);
+static MmAllocateIndependentPages_t g_allocate_pages;
+static MmSetPageProtection_t g_set_page_protection;
+static MmFreeIndependentPages_t g_free_pages;
+static PVOID g_allocated_memory;
+static SIZE_T g_allocated_size;
 
-PVOID allocated_memory;
-SIZE_T allocated_image_size;
-DWORD32 usermode_module_pid = 0;
-typedef NTSTATUS(__fastcall* PayloadEntry_t)(DWORD32);
-PayloadEntry_t PayloadEntry;
+typedef struct _SYSTEM_CODEINTEGRITY_INFORMATION_LOCAL {
+    ULONG Length;
+    ULONG CodeIntegrityOptions;
+} SYSTEM_CODEINTEGRITY_INFORMATION_LOCAL;
 
-#define SUPPORTED_WINDOWS_BUILD 19043
+typedef NTSTATUS(*ZwQuerySystemInformation_t)(ULONG, PVOID, ULONG, PULONG);
 
-static NTSTATUS ValidateSupportedBuild(VOID)
+static NTSTATUS QueryCodeIntegrity(ULONG* options)
 {
-	RTL_OSVERSIONINFOW version = { 0 };
-	version.dwOSVersionInfoSize = sizeof(version);
-	if (!NT_SUCCESS(RtlGetVersion(&version)))
-		return STATUS_NOT_SUPPORTED;
-	return version.dwBuildNumber == SUPPORTED_WINDOWS_BUILD
-		? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+    SYSTEM_CODEINTEGRITY_INFORMATION_LOCAL info = { 0 };
+    UNICODE_STRING name = RTL_CONSTANT_STRING(L"ZwQuerySystemInformation");
+    ZwQuerySystemInformation_t query;
+    if (!options)
+        return STATUS_INVALID_PARAMETER;
+    query = (ZwQuerySystemInformation_t)MmGetSystemRoutineAddress(&name);
+    if (!query)
+        return STATUS_PROCEDURE_NOT_FOUND;
+    info.Length = sizeof(info);
+    if (!NT_SUCCESS(query(103, &info, sizeof(info), NULL)))
+        return STATUS_NOT_SUPPORTED;
+    *options = info.CodeIntegrityOptions;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS ValidateHvcIAndCi(VOID)
+{
+    ULONG options = 0;
+    NTSTATUS status = QueryCodeIntegrity(&options);
+    if (!NT_SUCCESS(status))
+        return status;
+    /* CODEINTEGRITY_OPTION_HVCI_KMCI_ENABLED. Audit-only is not execution. */
+    return (options & 0x00000400u) ? STATUS_NOT_SUPPORTED : STATUS_SUCCESS;
+}
+
+static int HexValue(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static BOOLEAN GuidTextMatches(const GUID* guid, const char* text)
+{
+    ULONG d1 = 0;
+    USHORT d2 = 0, d3 = 0;
+    UCHAR d4[8] = { 0 };
+    ULONG i;
+    if (!guid || !text)
+        return FALSE;
+    for (i = 0; i < 8; ++i) { int h = HexValue(text[i]); int l = HexValue(text[i + 1]); if (h < 0 || l < 0) return FALSE; d1 = (d1 << 8) | (ULONG)((h << 4) | l); i++; }
+    if (text[8] != '-') return FALSE;
+    for (i = 9; i < 13; ++i) { int h = HexValue(text[i]); int l = HexValue(text[i + 1]); if (h < 0 || l < 0) return FALSE; d2 = (USHORT)((d2 << 8) | ((h << 4) | l)); i++; }
+    if (text[13] != '-') return FALSE;
+    for (i = 14; i < 18; ++i) { int h = HexValue(text[i]); int l = HexValue(text[i + 1]); if (h < 0 || l < 0) return FALSE; d3 = (USHORT)((d3 << 8) | ((h << 4) | l)); i++; }
+    if (text[18] != '-') return FALSE;
+    for (i = 0; i < 2; ++i) { int h = HexValue(text[19 + i * 2]); int l = HexValue(text[20 + i * 2]); if (h < 0 || l < 0) return FALSE; d4[i] = (UCHAR)((h << 4) | l); }
+    if (text[23] != '-') return FALSE;
+    for (i = 0; i < 6; ++i) { int h = HexValue(text[24 + i * 2]); int l = HexValue(text[25 + i * 2]); if (h < 0 || l < 0) return FALSE; d4[i + 2] = (UCHAR)((h << 4) | l); }
+    return guid->Data1 == d1 && guid->Data2 == d2 && guid->Data3 == d3 &&
+        RtlCompareMemory(guid->Data4, d4, sizeof(d4)) == sizeof(d4);
+}
+
+static BOOLEAN LoadedPdbMatches(PVOID image, const ModuleIdentity* identity)
+{
+    ULONG directory_size = 0;
+    PIMAGE_DEBUG_DIRECTORY debug = (PIMAGE_DEBUG_DIRECTORY)
+        RtlImageDirectoryEntryToData(image, TRUE, IMAGE_DIRECTORY_ENTRY_DEBUG, &directory_size);
+    ULONG count;
+    ULONG i;
+    if (!debug || directory_size < sizeof(*debug) || !identity->pdb_guid)
+        return FALSE;
+    count = directory_size / sizeof(*debug);
+    for (i = 0; i < count; ++i)
+    {
+        ULONG rva;
+        PULONG signature;
+        if (debug[i].Type != IMAGE_DEBUG_TYPE_CODEVIEW)
+            continue;
+        rva = debug[i].AddressOfRawData;
+        if (!rva)
+            continue;
+        signature = (PULONG)((PUCHAR)image + rva);
+        if (*signature != 0x53445352u) /* RSDS */
+            continue;
+        {
+            typedef struct _RSDS_LOCAL { ULONG signature; GUID guid; ULONG age; } RSDS_LOCAL;
+            RSDS_LOCAL* rsds = (RSDS_LOCAL*)signature;
+            return rsds->age == identity->pdb_age &&
+                GuidTextMatches(&rsds->guid, identity->pdb_guid);
+        }
+    }
+    return FALSE;
+}
+
+static NTSTATUS ValidateLoadedKernelIdentity(PVOID image, const ModuleIdentity* identity)
+{
+    PIMAGE_NT_HEADERS nt = RtlImageNtHeader(image);
+    if (!nt || nt->Signature != IMAGE_NT_SIGNATURE)
+        return STATUS_INVALID_IMAGE_FORMAT;
+    if (nt->FileHeader.TimeDateStamp != identity->time_date_stamp ||
+        nt->OptionalHeader.SizeOfImage != identity->size_of_image ||
+        nt->OptionalHeader.CheckSum != identity->check_sum ||
+        !LoadedPdbMatches(image, identity))
+        return STATUS_REVISION_MISMATCH;
+    {
+        UNICODE_STRING path = RTL_CONSTANT_STRING(L"\\SystemRoot\\System32\\ntoskrnl.exe");
+        OBJECT_ATTRIBUTES attributes;
+        IO_STATUS_BLOCK io_status = { 0 };
+        FILE_STANDARD_INFORMATION file_info = { 0 };
+        HANDLE file = NULL;
+        InitializeObjectAttributes(&attributes, &path,
+            OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+        if (!NT_SUCCESS(ZwOpenFile(&file, FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            &attributes, &io_status, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_SYNCHRONOUS_IO_NONALERT)) ||
+            !NT_SUCCESS(ZwQueryInformationFile(file, &io_status, &file_info,
+                sizeof(file_info), FileStandardInformation)))
+        {
+            if (file) ZwClose(file);
+            return STATUS_NOT_FOUND;
+        }
+        ZwClose(file);
+        if (file_info.EndOfFile.QuadPart != identity->file_size)
+            return STATUS_REVISION_MISMATCH;
+    }
+    return STATUS_SUCCESS;
+}
+
+static BOOLEAN RvaIsExecutable(PIMAGE_NT_HEADERS nt, ULONG rva)
+{
+    PIMAGE_SECTION_HEADER section = IMAGE_FIRST_SECTION(nt);
+    USHORT i;
+    for (i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+    {
+        ULONG size = section[i].Misc.VirtualSize > section[i].SizeOfRawData ?
+            section[i].Misc.VirtualSize : section[i].SizeOfRawData;
+        if (rva >= section[i].VirtualAddress &&
+            rva - section[i].VirtualAddress < size &&
+            (section[i].Characteristics & IMAGE_SCN_MEM_EXECUTE))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static NTSTATUS ValidateProfileRvas(PIMAGE_NT_HEADERS nt)
+{
+    if (!generated_profile.has_mm_allocate_independent_pages_rva ||
+        !generated_profile.has_mm_set_page_protection_rva ||
+        !generated_profile.has_mm_free_independent_pages_rva)
+        return STATUS_NOT_SUPPORTED;
+    if (!RvaIsExecutable(nt, generated_profile.mm_allocate_independent_pages_rva) ||
+        !RvaIsExecutable(nt, generated_profile.mm_set_page_protection_rva) ||
+        !RvaIsExecutable(nt, generated_profile.mm_free_independent_pages_rva))
+        return STATUS_INVALID_IMAGE_FORMAT;
+    return STATUS_SUCCESS;
 }
 
 static VOID ReleaseMappedImage(VOID)
 {
-	if (allocated_memory && MmFreeIndependentPages)
-		MmFreeIndependentPages(allocated_memory, allocated_image_size);
-	allocated_memory = NULL;
-	allocated_image_size = 0;
-	PayloadEntry = NULL;
+    if (g_allocated_memory && g_free_pages)
+        g_free_pages(g_allocated_memory, g_allocated_size);
+    g_allocated_memory = NULL;
+    g_allocated_size = 0;
 }
 
-static NTSTATUS ShutdownMappedPayload(VOID)
+static BOOLEAN RvaRangeValid(PIMAGE_NT_HEADERS nt, ULONG rva, ULONG size)
 {
-	return PayloadEntry ? PayloadEntry(0) : STATUS_SUCCESS;
+    return rva <= nt->OptionalHeader.SizeOfImage &&
+        size <= nt->OptionalHeader.SizeOfImage - rva;
 }
 
-void CopyHeadersAndSections(LPVOID source, LPVOID destination, PIMAGE_NT_HEADERS pNTHeader)
+static NTSTATUS ValidateImageLayout(PVOID source, SIZE_T source_size,
+    PIMAGE_NT_HEADERS nt)
 {
-	// Don't copy PE header - could be detected
-	//memcpy(destination, source, pNTHeader->OptionalHeader.SizeOfHeaders);
+    PIMAGE_SECTION_HEADER section;
+    USHORT i;
 
-	PIMAGE_SECTION_HEADER pSectionHeader = IMAGE_FIRST_SECTION(pNTHeader);
-	for (WORD i = 0; i < pNTHeader->FileHeader.NumberOfSections; i++)
-	{
-		if (!pSectionHeader[i].SizeOfRawData)
-			continue;
-
-		memcpy((PBYTE)destination + pSectionHeader[i].VirtualAddress, (PBYTE)source + pSectionHeader[i].PointerToRawData, pSectionHeader[i].SizeOfRawData);
-	}
+    if (!nt || nt->Signature != IMAGE_NT_SIGNATURE ||
+        nt->FileHeader.SizeOfOptionalHeader != sizeof(IMAGE_OPTIONAL_HEADER64) ||
+        nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+        nt->OptionalHeader.SizeOfImage == 0 ||
+        nt->OptionalHeader.SizeOfHeaders == 0 ||
+        nt->OptionalHeader.FileAlignment == 0 ||
+        nt->OptionalHeader.SectionAlignment == 0 ||
+        nt->OptionalHeader.SectionAlignment < nt->OptionalHeader.FileAlignment ||
+        nt->OptionalHeader.SizeOfHeaders > nt->OptionalHeader.SizeOfImage ||
+        nt->OptionalHeader.SizeOfHeaders > source_size ||
+        (nt->OptionalHeader.SizeOfHeaders % nt->OptionalHeader.FileAlignment) != 0 ||
+        (nt->OptionalHeader.SizeOfImage % nt->OptionalHeader.SectionAlignment) != 0)
+        return STATUS_INVALID_IMAGE_FORMAT;
+    section = IMAGE_FIRST_SECTION(nt);
+    if ((PUCHAR)section + nt->FileHeader.NumberOfSections * sizeof(*section) >
+        (PUCHAR)source + source_size)
+        return STATUS_INVALID_IMAGE_FORMAT;
+    for (i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+    {
+        ULONG span = section[i].Misc.VirtualSize > section[i].SizeOfRawData ?
+            section[i].Misc.VirtualSize : section[i].SizeOfRawData;
+        if (section[i].VirtualAddress % nt->OptionalHeader.SectionAlignment != 0 ||
+            section[i].VirtualAddress > nt->OptionalHeader.SizeOfImage ||
+            span > nt->OptionalHeader.SizeOfImage - section[i].VirtualAddress ||
+            (section[i].SizeOfRawData &&
+                (section[i].PointerToRawData > source_size ||
+                 section[i].SizeOfRawData > source_size - section[i].PointerToRawData)) ||
+            (section[i].SizeOfRawData &&
+                (section[i].PointerToRawData % nt->OptionalHeader.FileAlignment) != 0))
+            return STATUS_INVALID_IMAGE_FORMAT;
+    }
+    return STATUS_SUCCESS;
 }
 
-UNICODE_STRING ASCIIToUnicode(char* ascii, wchar_t* memory, size_t memory_size)
+static NTSTATUS CopyHeadersAndSections(PVOID source, SIZE_T source_size,
+    PVOID destination, PIMAGE_NT_HEADERS nt)
 {
-	UNICODE_STRING str = { 0 };
-	wchar_t* wchar_meme = memory;
-	size_t used = 0;
-	while (*ascii && used + 1 < memory_size)
-		memory[used++] = (wchar_t)*ascii++;
-	if (*ascii)
-		return str;
+    PIMAGE_SECTION_HEADER section = IMAGE_FIRST_SECTION(nt);
+    NTSTATUS status = ValidateImageLayout(source, source_size, nt);
+    USHORT i;
 
-	memory[used] = L'\0';
-	str.Buffer = wchar_meme;
-	str.Length = (USHORT)(used * sizeof(wchar_t));
-	str.MaximumLength = (USHORT)((used + 1) * sizeof(wchar_t));
-	return str;
+    if (!NT_SUCCESS(status))
+        return status;
+    RtlZeroMemory(destination, nt->OptionalHeader.SizeOfImage);
+    RtlCopyMemory(destination, source, nt->OptionalHeader.SizeOfHeaders);
+    for (i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+    {
+        ULONG span = section[i].Misc.VirtualSize > section[i].SizeOfRawData ?
+            section[i].Misc.VirtualSize : section[i].SizeOfRawData;
+        if (section[i].SizeOfRawData)
+            RtlCopyMemory((PUCHAR)destination + section[i].VirtualAddress,
+                (PUCHAR)source + section[i].PointerToRawData,
+                section[i].SizeOfRawData);
+        if (span > section[i].SizeOfRawData)
+            RtlZeroMemory((PUCHAR)destination + section[i].VirtualAddress +
+                section[i].SizeOfRawData, span - section[i].SizeOfRawData);
+    }
+    return STATUS_SUCCESS;
 }
 
-NTSTATUS FixIAT(LPVOID destination, PIMAGE_NT_HEADERS pNTHeader)
+static NTSTATUS FixIat(PVOID destination, PIMAGE_NT_HEADERS nt)
 {
-	if (pNTHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress && pNTHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size)
-	{
-		PIMAGE_IMPORT_DESCRIPTOR pDescriptor = (PIMAGE_IMPORT_DESCRIPTOR)((PBYTE)destination + pNTHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
+    IMAGE_DATA_DIRECTORY directory;
+    PIMAGE_IMPORT_DESCRIPTOR descriptor;
+    ULONG descriptor_count;
+    ULONG descriptor_index;
 
-		while (pDescriptor->Name) // There should only be one (ntoskrnl), so this loop isnt really needed i guess
-		{
-			LPCSTR pDllName = (LPCSTR)((PBYTE)destination + pDescriptor->Name);
-#ifdef _DEBUG
-			DbgPrintEx(DPFLTR_IHVDRIVER_ID, -1, "pDescriptor name is: %s\r\n", pDllName);
-			DbgPrintEx(DPFLTR_IHVDRIVER_ID, -1, "pDescriptor value is: 0x%X\r\n", pDescriptor->Name);
-			DbgPrintEx(DPFLTR_IHVDRIVER_ID, -1, "pDescriptor address is: 0x%p\r\n", pDescriptor);
-#endif
-
-			PIMAGE_THUNK_DATA pThunk;
-			PIMAGE_THUNK_DATA pAddrThunk;
-
-			if (pDescriptor->OriginalFirstThunk)
-			{
-				pThunk = (PIMAGE_THUNK_DATA)((PBYTE)destination + pDescriptor->OriginalFirstThunk);
-			}
-			else
-			{
-				pThunk = (PIMAGE_THUNK_DATA)((PBYTE)destination + pDescriptor->FirstThunk);
-			}
-
-			pAddrThunk = (PIMAGE_THUNK_DATA)((PBYTE)destination + pDescriptor->FirstThunk);
-
-			while (pThunk->u1.AddressOfData)
-			{
-				FARPROC lpFunction = NULL;
-
-				if (IMAGE_SNAP_BY_ORDINAL(pThunk->u1.Ordinal))
-				{
-					return STATUS_NOT_SUPPORTED;
-#ifdef _DEBUG
-					DbgPrintEx(DPFLTR_IHVDRIVER_ID, -1, "Function ptr: %p\r\n", lpFunction);
-#endif
-				}
-				else
-				{
-					PIMAGE_IMPORT_BY_NAME pImport = (PIMAGE_IMPORT_BY_NAME)((PBYTE)destination + pThunk->u1.AddressOfData);
-
-					wchar_t buffer[128];
-					UNICODE_STRING unicode_str = ASCIIToUnicode(pImport->Name, buffer, sizeof(buffer) / sizeof(wchar_t));
-					if (!unicode_str.Buffer || unicode_str.Length == 0)
-						return STATUS_BUFFER_OVERFLOW;
-
-					lpFunction = MmGetSystemRoutineAddress(&unicode_str);
-#ifdef _DEBUG
-					DbgPrintEx(DPFLTR_IHVDRIVER_ID, -1, "Function ptr: %p\r\n", lpFunction);
-#endif
-				}
-
-				if (!lpFunction)
-					return STATUS_PROCEDURE_NOT_FOUND;
-
-				pAddrThunk->u1.Function = (UINT_PTR)lpFunction;
-
-				pThunk++;
-				pAddrThunk++;
-			}
-
-			pDescriptor++;
-		}
-	}
-	return STATUS_SUCCESS;
+    if (nt->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_IMPORT)
+        return STATUS_SUCCESS;
+    directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!directory.VirtualAddress || !directory.Size)
+        return STATUS_SUCCESS;
+    if (!RvaRangeValid(nt, directory.VirtualAddress, directory.Size) ||
+        directory.Size < sizeof(IMAGE_IMPORT_DESCRIPTOR))
+        return STATUS_INVALID_IMAGE_FORMAT;
+    descriptor = (PIMAGE_IMPORT_DESCRIPTOR)((PUCHAR)destination +
+        directory.VirtualAddress);
+    descriptor_count = directory.Size / sizeof(*descriptor);
+    for (descriptor_index = 0; descriptor_index < descriptor_count;
+        ++descriptor_index, ++descriptor)
+    {
+        ULONG thunk_rva;
+        ULONG address_thunk_rva;
+        if (!descriptor->Name)
+            break;
+        if (!RvaRangeValid(nt, descriptor->Name, sizeof(UCHAR)) ||
+            !descriptor->FirstThunk)
+            return STATUS_INVALID_IMAGE_FORMAT;
+        thunk_rva = descriptor->OriginalFirstThunk ? descriptor->OriginalFirstThunk :
+            descriptor->FirstThunk;
+        address_thunk_rva = descriptor->FirstThunk;
+        while (TRUE)
+        {
+            PVOID function = NULL;
+            PIMAGE_THUNK_DATA thunk;
+            PIMAGE_THUNK_DATA address_thunk;
+            if (!RvaRangeValid(nt, thunk_rva, sizeof(IMAGE_THUNK_DATA)) ||
+                !RvaRangeValid(nt, address_thunk_rva, sizeof(IMAGE_THUNK_DATA)))
+                return STATUS_INVALID_IMAGE_FORMAT;
+            thunk = (PIMAGE_THUNK_DATA)((PUCHAR)destination + thunk_rva);
+            address_thunk = (PIMAGE_THUNK_DATA)((PUCHAR)destination +
+                address_thunk_rva);
+            if (!thunk->u1.AddressOfData)
+                break;
+            if (IMAGE_SNAP_BY_ORDINAL(thunk->u1.Ordinal))
+                return STATUS_NOT_SUPPORTED;
+            {
+                PIMAGE_IMPORT_BY_NAME import = (PIMAGE_IMPORT_BY_NAME)
+                    ((PUCHAR)destination + thunk->u1.AddressOfData);
+                UNICODE_STRING name = { 0 };
+                WCHAR buffer[128];
+                SIZE_T chars = 0;
+                if (!RvaRangeValid(nt, thunk->u1.AddressOfData, sizeof(USHORT)))
+                    return STATUS_INVALID_IMAGE_FORMAT;
+                while (chars + 1 < RTL_NUMBER_OF(buffer) &&
+                    RvaRangeValid(nt, thunk->u1.AddressOfData +
+                        FIELD_OFFSET(IMAGE_IMPORT_BY_NAME, Name) + (ULONG)chars,
+                        sizeof(UCHAR)) && import->Name[chars])
+                {
+                    buffer[chars] = (WCHAR)import->Name[chars];
+                    ++chars;
+                }
+                if (chars == 0 || !RvaRangeValid(nt, thunk->u1.AddressOfData +
+                    FIELD_OFFSET(IMAGE_IMPORT_BY_NAME, Name) + (ULONG)chars,
+                    sizeof(UCHAR)) || import->Name[chars])
+                    return STATUS_BUFFER_OVERFLOW;
+                buffer[chars] = L'\0';
+                name.Buffer = buffer;
+                name.Length = (USHORT)(chars * sizeof(WCHAR));
+                name.MaximumLength = (USHORT)((chars + 1) * sizeof(WCHAR));
+                function = MmGetSystemRoutineAddress(&name);
+            }
+            if (!function)
+                return STATUS_PROCEDURE_NOT_FOUND;
+            address_thunk->u1.Function = (ULONGLONG)(ULONG_PTR)function;
+            if (thunk_rva > MAXULONG - sizeof(IMAGE_THUNK_DATA) ||
+                address_thunk_rva > MAXULONG - sizeof(IMAGE_THUNK_DATA))
+                return STATUS_INVALID_IMAGE_FORMAT;
+            thunk_rva += sizeof(IMAGE_THUNK_DATA);
+            address_thunk_rva += sizeof(IMAGE_THUNK_DATA);
+        }
+    }
+    return STATUS_SUCCESS;
 }
 
-void FixRelocations(LPVOID destination, PIMAGE_NT_HEADERS pNTHeader)
+static NTSTATUS FixRelocations(PVOID destination, PIMAGE_NT_HEADERS nt)
 {
-	if ((UINT_PTR)destination != pNTHeader->OptionalHeader.ImageBase && pNTHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress && pNTHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size)
-	{
-		PIMAGE_BASE_RELOCATION pRelocTable = (PIMAGE_BASE_RELOCATION)((PBYTE)destination + pNTHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress);
-		UINT_PTR delta = (UINT_PTR)((PBYTE)destination - pNTHeader->OptionalHeader.ImageBase);
-
-		while (pRelocTable->SizeOfBlock)
-		{
-			PWORD pRelocationData = (PWORD)((PBYTE)pRelocTable + sizeof(IMAGE_BASE_RELOCATION));
-			DWORD NumberOfRelocationData = (pRelocTable->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
-
-			for (DWORD i = 0; i < NumberOfRelocationData; i++)
-			{
-				DWORD relocationType = pRelocationData[i] >> 12;
-				if (relocationType == IMAGE_REL_BASED_HIGHLOW)
-				{
-					PDWORD pAddress = (PDWORD)((PBYTE)destination + pRelocTable->VirtualAddress + (pRelocationData[i] & 0x0FFF));
-					*pAddress += (DWORD)delta;
-				}
-				else if (relocationType == IMAGE_REL_BASED_DIR64)
-				{
-					PDWORD64 pAddress = (PDWORD64)((PBYTE)destination + pRelocTable->VirtualAddress + (pRelocationData[i] & 0x0FFF));
-					*pAddress += delta;
-				}
-			}
-
-			pRelocTable = (PIMAGE_BASE_RELOCATION)((PBYTE)pRelocTable + pRelocTable->SizeOfBlock);
-		}
-	}
+    IMAGE_DATA_DIRECTORY directory;
+    ULONG directory_size;
+    PIMAGE_BASE_RELOCATION table;
+    ULONG_PTR delta = (ULONG_PTR)destination - nt->OptionalHeader.ImageBase;
+    if (nt->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_BASERELOC)
+        return STATUS_SUCCESS;
+    directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+    if (!directory.VirtualAddress || !directory.Size)
+        return STATUS_SUCCESS;
+    if (!RvaRangeValid(nt, directory.VirtualAddress, directory.Size))
+        return STATUS_INVALID_IMAGE_FORMAT;
+    table = (PIMAGE_BASE_RELOCATION)((PUCHAR)destination + directory.VirtualAddress);
+    directory_size = directory.Size;
+    while (directory_size >= sizeof(*table))
+    {
+        if (table->SizeOfBlock < sizeof(*table) ||
+            table->SizeOfBlock > directory_size ||
+            ((table->SizeOfBlock - sizeof(*table)) % sizeof(USHORT)) != 0)
+            return STATUS_INVALID_IMAGE_FORMAT;
+        ULONG count = (table->SizeOfBlock - sizeof(*table)) / sizeof(USHORT);
+        PUSHORT entries = (PUSHORT)((PUCHAR)table + sizeof(*table));
+        ULONG i;
+        for (i = 0; i < count; ++i)
+        {
+            ULONG type = entries[i] >> 12;
+            ULONG offset = entries[i] & 0xfff;
+            ULONG rva;
+            if (table->VirtualAddress > MAXULONG - offset)
+                return STATUS_INVALID_IMAGE_FORMAT;
+            rva = table->VirtualAddress + offset;
+            if (type == IMAGE_REL_BASED_DIR64)
+            {
+                if (!delta || !RvaRangeValid(nt, rva, sizeof(ULONGLONG)))
+                {
+                    if (delta)
+                        return STATUS_INVALID_IMAGE_FORMAT;
+                    continue;
+                }
+                *(PULONG_PTR)((PUCHAR)destination + rva) += delta;
+            }
+            else if (type != IMAGE_REL_BASED_ABSOLUTE)
+                return STATUS_NOT_SUPPORTED;
+        }
+        directory_size -= table->SizeOfBlock;
+        table = (PIMAGE_BASE_RELOCATION)((PUCHAR)table + table->SizeOfBlock);
+    }
+    if (directory_size != 0)
+        return STATUS_INVALID_IMAGE_FORMAT;
+    return STATUS_SUCCESS;
 }
 
-NTSTATUS ManualMap()
+static NTSTATUS ManualMap(PDRIVER_OBJECT driver_object)
 {
-	NTSTATUS status = ValidateSupportedBuild();
-	if (!NT_SUCCESS(status))
-		return status;
+    RTL_OSVERSIONINFOW version = { 0 };
+    PVOID kernel_base = NULL;
+    PIMAGE_NT_HEADERS kernel_nt;
+    PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)&hexData;
+    PIMAGE_NT_HEADERS payload_nt;
+    PUBGEXT_PAYLOAD_INIT init = { 0 };
+    PUBGEXT_PAYLOAD_INIT_RESULT result = { 0 };
+    PUBGEXT_PAYLOAD_ENTRY entry;
+    NTSTATUS status;
 
-	PVOID ntoskrnl_base = NULL;
-	if (!RtlPcToFileHeader((PVOID)&RtlPcToFileHeader, &ntoskrnl_base) || !ntoskrnl_base)
-		return STATUS_NOT_FOUND;
+    /* (1) version supported: derive the build from the generated profile. */
+    version.dwOSVersionInfoSize = sizeof(version);
+    if (!NT_SUCCESS(RtlGetVersion(&version)) || !generated_profile.ntoskrnl.file_version)
+        return STATUS_NOT_SUPPORTED;
+    {
+        ULONG profile_build = 0;
+        const char* p = generated_profile.ntoskrnl.file_version;
+        while (*p && *p != '.') ++p;
+        if (*p) ++p; while (*p && *p != '.') ++p;
+        if (*p) ++p; while (*p >= '0' && *p <= '9') { profile_build = profile_build * 10 + (ULONG)(*p - '0'); ++p; }
+        if (!profile_build || version.dwBuildNumber != profile_build)
+            return STATUS_NOT_SUPPORTED;
+    }
+    /* (2) fail closed when kernel-mode HVCI is active. */
+    status = ValidateHvcIAndCi();
+    if (!NT_SUCCESS(status))
+        return status;
+    if (!RtlPcToFileHeader((PVOID)&RtlPcToFileHeader, &kernel_base) || !kernel_base)
+        return STATUS_NOT_FOUND;
+    kernel_nt = RtlImageNtHeader(kernel_base);
+    if (!kernel_nt)
+        return STATUS_INVALID_IMAGE_FORMAT;
+    /* (3) loaded ntoskrnl identity and (4) exact generated profile selection. */
+    status = ValidateLoadedKernelIdentity(kernel_base, &generated_profile.ntoskrnl);
+    if (!NT_SUCCESS(status))
+        return status;
+    if (!generated_profile.profile_id || generated_profile.ntoskrnl.file_size == 0)
+        return STATUS_NOT_SUPPORTED;
+    /* (5) every generated RVA must resolve to an executable section. */
+    status = ValidateProfileRvas(kernel_nt);
+    if (!NT_SUCCESS(status))
+        return status;
 
-	UNICODE_STRING free_pages_name = RTL_CONSTANT_STRING(L"MmFreeIndependentPages");
-	MmFreeIndependentPages = (MmFreeIndependentPages_t)MmGetSystemRoutineAddress(
-		&free_pages_name);
-	if (!MmFreeIndependentPages)
-		return STATUS_NOT_SUPPORTED;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 ||
+        (SIZE_T)dos->e_lfanew > sizeof(hexData) - sizeof(IMAGE_NT_HEADERS))
+        return STATUS_INVALID_IMAGE_FORMAT;
+    payload_nt = (PIMAGE_NT_HEADERS)((PUCHAR)&hexData + dos->e_lfanew);
+    if (payload_nt->Signature != IMAGE_NT_SIGNATURE ||
+        payload_nt->OptionalHeader.SizeOfImage == 0)
+        return STATUS_INVALID_IMAGE_FORMAT;
+    status = ValidateImageLayout(&hexData, sizeof(hexData), payload_nt);
+    if (!NT_SUCCESS(status))
+        return status;
+    if (!RvaRangeValid(payload_nt, payload_nt->OptionalHeader.AddressOfEntryPoint,
+        sizeof(UCHAR)))
+        return STATUS_INVALID_IMAGE_FORMAT;
 
-	uintptr_t ntoskrnl_imagebase = (uintptr_t)ntoskrnl_base;
+    g_allocate_pages = (MmAllocateIndependentPages_t)((PUCHAR)kernel_base + generated_profile.mm_allocate_independent_pages_rva);
+    g_set_page_protection = (MmSetPageProtection_t)((PUCHAR)kernel_base + generated_profile.mm_set_page_protection_rva);
+    g_free_pages = (MmFreeIndependentPages_t)((PUCHAR)kernel_base + generated_profile.mm_free_independent_pages_rva);
+    /* (6) map only after all preflight checks have passed. */
+    g_allocated_size = payload_nt->OptionalHeader.SizeOfImage;
+    g_allocated_memory = g_allocate_pages(g_allocated_size, (ULONG)-1);
+    if (!g_allocated_memory)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    if (!g_set_page_protection(g_allocated_memory, g_allocated_size, PAGE_EXECUTE_READWRITE))
+    {
+        status = STATUS_UNSUCCESSFUL;
+        goto map_failure;
+    }
+    status = CopyHeadersAndSections(&hexData, sizeof(hexData),
+        g_allocated_memory, payload_nt);
+    if (!NT_SUCCESS(status)) goto map_failure;
+    status = FixRelocations(g_allocated_memory, payload_nt);
+    if (!NT_SUCCESS(status)) goto map_failure;
+    status = FixIat(g_allocated_memory, payload_nt);
+    if (!NT_SUCCESS(status)) goto map_failure;
 
-	PIMAGE_DOS_HEADER pDOSHeader = (PIMAGE_DOS_HEADER)&hexData;
-	PIMAGE_NT_HEADERS pNTHeader = (PIMAGE_NT_HEADERS)((PBYTE)&hexData + pDOSHeader->e_lfanew);
-#ifdef _DEBUG
-	DbgPrintEx(DPFLTR_IHVDRIVER_ID, -1, "ntoskrnel.exe: 0x%p\r\n", ntoskrnl_imagebase);
-#endif
-	uintptr_t pMmAllocateIndependentPages = ntoskrnl_imagebase + 0x809420; // ntoskrnl!MmAllocateIndependentPages
-	MmAllocateIndependentPages = (MmAllocateIndependentPages_t)(pMmAllocateIndependentPages);
-	if (!MmAllocateIndependentPages)
-		return STATUS_NOT_SUPPORTED;
-
-	allocated_memory = MmAllocateIndependentPages(pNTHeader->OptionalHeader.SizeOfImage, -1);
-	if (!allocated_memory)
-		return STATUS_INSUFFICIENT_RESOURCES;
-	allocated_image_size = pNTHeader->OptionalHeader.SizeOfImage;
-#ifdef _DEBUG
-	DbgPrintEx(DPFLTR_IHVDRIVER_ID, -1, "Allocated at 0x%p\r\n", allocated_memory);
-#endif
-
-	uintptr_t pMmSetPageProtection = ntoskrnl_imagebase + 0x3B3B60; // ntoskrnl!MmSetPageProtection
-	MmSetPageProtection = (MmSetPageProtection_t)(pMmSetPageProtection);
-	if (!MmSetPageProtection)
-	{
-		status = STATUS_NOT_SUPPORTED;
-		goto map_failure;
-	}
-
-	BOOLEAN result = MmSetPageProtection(allocated_memory, pNTHeader->OptionalHeader.SizeOfImage, PAGE_EXECUTE_READWRITE);
-	if (!result)
-	{
-		status = STATUS_UNSUCCESSFUL;
-		goto map_failure;
-	}
-	
-	CopyHeadersAndSections(&hexData, allocated_memory, pNTHeader);
-	NTSTATUS import_status = FixIAT(allocated_memory, pNTHeader);
-	if (!NT_SUCCESS(import_status))
-	{
-		status = import_status;
-		goto map_failure;
-	}
-	FixRelocations(allocated_memory, pNTHeader);
-
-	LPVOID dwEntryPoint = (PBYTE)allocated_memory + pNTHeader->OptionalHeader.AddressOfEntryPoint;
-	PayloadEntry = (PayloadEntry_t)dwEntryPoint;
-	status = PayloadEntry(usermode_module_pid);
-	if (!NT_SUCCESS(status))
-	{
-		NTSTATUS teardown_status = ShutdownMappedPayload();
-		if (!NT_SUCCESS(teardown_status))
-			return teardown_status;
-		goto map_failure;
-	}
-	return status;
+    entry = (PUBGEXT_PAYLOAD_ENTRY)((PUCHAR)g_allocated_memory + payload_nt->OptionalHeader.AddressOfEntryPoint);
+    init.struct_size = sizeof(init);
+    init.abi_major = PUBGEXT_PAYLOAD_ABI_MAJOR;
+    init.abi_minor = PUBGEXT_PAYLOAD_ABI_MINOR;
+    init.driver_object = (uint64_t)(ULONG_PTR)driver_object;
+    status = (NTSTATUS)entry(&init, &result);
+    if (!NT_SUCCESS(status) || !result.device_created)
+    {
+        /* The payload creates the device atomically; failed init leaves none. */
+        status = NT_SUCCESS(status) ? STATUS_UNSUCCESSFUL : status;
+        goto map_failure;
+    }
+    return STATUS_SUCCESS;
 
 map_failure:
-	ReleaseMappedImage();
-	return status;
+    /* (7) a failed payload never leaves the mapped image or a device behind. */
+    ReleaseMappedImage();
+    return status;
 }
 
-void DriverUnload(PDRIVER_OBJECT pDriverObject)
+NTSTATUS DriverEntry(PDRIVER_OBJECT driver_object, PUNICODE_STRING registry_path)
 {
-	UNREFERENCED_PARAMETER(pDriverObject);
-	NTSTATUS teardown_status = ShutdownMappedPayload();
-	if (!NT_SUCCESS(teardown_status))
-	{
-#ifdef _DEBUG
-		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
-			"ReadWriteDriverMapper: payload teardown failed: 0x%08X\n",
-			teardown_status);
-#endif
-		/* DriverUnload has no status return; retain the image on failure. */
-		return;
-	}
-	ReleaseMappedImage();
-#ifdef _DEBUG
-	DbgPrintEx(DPFLTR_IHVDRIVER_ID, -1, "Driver unload called!\n");
-#endif
-}
-
-NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT  DriverObject, _In_ PUNICODE_STRING RegistryPath)
-{
-	NTSTATUS regStatus = 0;
-	RTL_QUERY_REGISTRY_TABLE query[2];
-	if (!RegistryPath || !RegistryPath->Buffer)
-		return STATUS_INVALID_PARAMETER;
-	RtlZeroMemory(query, sizeof(query));
-
-	query[0].Name = L"pid"; // L"" refers to the default value
-	query[0].Flags = RTL_QUERY_REGISTRY_DIRECT;
-	query[0].EntryContext = &usermode_module_pid;
-	query[0].DefaultType = REG_DWORD;
-	query[0].DefaultLength = sizeof(DWORD32);
-	query[0].DefaultData = &usermode_module_pid;
-
-	regStatus = RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE, RegistryPath->Buffer, query, NULL, NULL);
-	if (!NT_SUCCESS(regStatus))
-		return regStatus;
-	if (usermode_module_pid == 0)
-		return STATUS_INVALID_PARAMETER;
-
-#ifdef _DEBUG
-	DbgPrintEx(DPFLTR_IHVDRIVER_ID, -1, "regStatus: %lx\n", regStatus);
-#endif
-
-#ifdef _DEBUG
-	DbgPrintEx(DPFLTR_IHVDRIVER_ID, -1, "Path %wZ\n", *RegistryPath);
-#endif
-
-	NTSTATUS mapStatus = ManualMap();
-	if (!NT_SUCCESS(mapStatus))
-		return mapStatus;
-#ifdef _DEBUG
-	DbgPrintEx(DPFLTR_IHVDRIVER_ID, -1, "Manual map done\n");
-#endif
-	DriverObject->DriverUnload = DriverUnload;
-	return STATUS_CONNECTION_ACTIVE;
+    UNREFERENCED_PARAMETER(registry_path);
+    /* Mapper unload is disabled because its mapped payload is intentionally resident. */
+    driver_object->DriverUnload = NULL;
+    return ManualMap(driver_object);
 }

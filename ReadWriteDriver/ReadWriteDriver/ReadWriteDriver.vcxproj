@@ -151,7 +151,7 @@
       <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
-      <EntryPointSymbol>EntryPoint</EntryPointSymbol>
+      <EntryPointSymbol>PayloadInitialize</EntryPointSymbol>
     </Link>
     <DriverSign>
       <FileDigestAlgorithm>SHA256</FileDigestAlgorithm>
@@ -160,10 +160,11 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
       <TreatWarningAsError>false</TreatWarningAsError>
+      <AdditionalOptions>/Brepro %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
-      <EntryPointSymbol>EntryPoint</EntryPointSymbol>
-      <AdditionalOptions> /nocoffgrpinfo /INTEGRITYCHECK %(AdditionalOptions)</AdditionalOptions>
+      <EntryPointSymbol>PayloadInitialize</EntryPointSymbol>
+      <AdditionalOptions>/Brepro /nocoffgrpinfo /INTEGRITYCHECK %(AdditionalOptions)</AdditionalOptions>
       <GenerateMapFile>true</GenerateMapFile>
       <MapExports>true</MapExports>
       <GenerateDebugInformation>false</GenerateDebugInformation>
@@ -177,14 +178,12 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="driver.h" />
-    <ClInclude Include="physmem.h" />
+    <ClInclude Include="payload_api.h" />
+    <ClInclude Include="virtual_copy.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="driver.c" />
-    <ClCompile Include="physmem.c" />
-  </ItemGroup>
-  <ItemGroup>
-    <MASM Include="assembly.asm" />
+    <ClCompile Include="virtual_copy.c" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

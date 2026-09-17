@@ -2,293 +2,421 @@
 #include "Halo.h"
 #include "Apex.h"
 
-NtUserSetSysColors_t NtUserSetSysColors;
-DWORD aNewColors[24];
-static uint64_t g_session_token = 0;
+#include <algorithm>
+#include <cstdio>
+#include <cstring>
+#include <limits>
+#include <vector>
 
-static NTSTATUS InvokeCommand(Command& command)
+namespace
 {
-	if (!NtUserSetSysColors)
-		return STATUS_INVALID_CID;
-	if (command.op != COMMAND_ISLOADED && g_session_token == 0)
-		return STATUS_ACCESS_DENIED;
+    constexpr NTSTATUS kStatusUnsuccessful = static_cast<NTSTATUS>(0xC0000001);
+    constexpr NTSTATUS kStatusPartialCopy = static_cast<NTSTATUS>(0x8000000D);
 
-	command.magic = COMMAND_MAGIC;
-	command.version = PROTOCOL_VERSION;
-	command.size = sizeof(Command);
-	command.user_result = reinterpret_cast<uintptr_t>(&command);
-	command.auth_token = command.op == COMMAND_ISLOADED ? 0 : g_session_token;
-	command.status = STATUS_INVALID_CID;
+    HANDLE g_device = INVALID_HANDLE_VALUE;
+    uint32_t g_max_transfer = 0;
+    uint64_t g_next_request_id = 1;
 
-	const BOOL result = NtUserSetSysColors(
-		static_cast<unsigned int>(sizeof(Command) / sizeof(DWORD)),
-		reinterpret_cast<char*>(&command), reinterpret_cast<char*>(aNewColors), 0);
-	if (!result && command.status == STATUS_INVALID_CID)
-		return STATUS_INVALID_CID;
-	return static_cast<NTSTATUS>(command.status);
+    void DebugLog(const char* message)
+    {
+        OutputDebugStringA(message);
+    }
+
+    bool NtSucceeded(NTSTATUS status)
+    {
+        return status >= 0;
+    }
+
+    uint64_t NextRequestId()
+    {
+        return g_next_request_id++;
+    }
+
+    void InitializeRequestHeader(PUBGEXT_REQUEST_HEADER& header,
+                                 uint32_t structSize)
+    {
+        header = {};
+        header.magic = PUBGEXT_IOCTL_MAGIC;
+        header.major = PUBGEXT_PROTOCOL_MAJOR;
+        header.minor = PUBGEXT_PROTOCOL_MINOR;
+        header.struct_size = structSize;
+        header.request_id = NextRequestId();
+    }
+
+    bool ValidateResponse(const PUBGEXT_RESPONSE_HEADER& header,
+                          uint32_t expectedSize, uint64_t requestId,
+                          const char* operation)
+    {
+        if (header.magic != PUBGEXT_IOCTL_MAGIC ||
+            header.struct_size != expectedSize ||
+            header.flags != 0 || header.reserved != 0 ||
+            header.request_id != requestId)
+        {
+            std::printf("%s returned an invalid response header\n", operation);
+            return false;
+        }
+        if (header.major != PUBGEXT_PROTOCOL_MAJOR ||
+            header.minor != PUBGEXT_PROTOCOL_MINOR)
+        {
+            std::printf("%s returned STATUS_REVISION_MISMATCH\n", operation);
+            return false;
+        }
+        return true;
+    }
+
+    size_t TransferChunkSize()
+    {
+        return static_cast<size_t>(std::min<uint32_t>(
+            PUBGEXT_COPY_CHUNK,
+            std::min<uint32_t>(g_max_transfer, PUBGEXT_MAX_TRANSFER)));
+    }
+
+    NTSTATUS IoctlFailure(const char* operation)
+    {
+        const DWORD error = GetLastError();
+        char message[256] = {};
+        sprintf_s(message, "%s DeviceIoControl failed (Win32 error %lu)\n",
+                  operation, error);
+        DebugLog(message);
+        return kStatusUnsuccessful;
+    }
 }
 
-HKEY svcRoot, svcKey;
-
-LSTATUS PrepareDriverRegEntry(const std::wstring& svcName, const std::wstring& path)
+bool InitializeDevice()
 {
-	DWORD dwType = 1;
-	LSTATUS status = 0;
-	WCHAR wszLocalPath[MAX_PATH] = { 0 };
+    if (g_device != INVALID_HANDLE_VALUE)
+        return true;
 
-	swprintf_s(wszLocalPath, ARRAYSIZE(wszLocalPath), L"\\??\\%s", path.c_str());
+    g_device = CreateFileW(L"\\\\.\\PubgExtRw",
+                           GENERIC_READ | GENERIC_WRITE,
+                           0,
+                           nullptr,
+                           OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL,
+                           nullptr);
+    if (g_device == INVALID_HANDLE_VALUE)
+    {
+        std::printf("Could not open \\\\.\\PubgExtRw (error %lu). "
+                    "The driver must already be loaded and this tool elevated.\n",
+                    GetLastError());
+        return false;
+    }
 
-	status = RegOpenKeyW(HKEY_LOCAL_MACHINE, L"system\\CurrentControlSet\\Services", &svcRoot);
-	if (status)
-		return status;
+    PUBGEXT_REQUEST_HEADER queryRequest = {};
+    InitializeRequestHeader(queryRequest, sizeof(queryRequest));
+    PUBGEXT_QUERY_CAPS_RESPONSE queryResponse = {};
+    DWORD returned = 0;
+    if (!DeviceIoControl(g_device, PUBGEXT_IOCTL_QUERY_CAPS,
+                         &queryRequest, sizeof(queryRequest),
+                         &queryResponse, sizeof(queryResponse),
+                         &returned, nullptr) ||
+        returned < sizeof(queryResponse) ||
+        !ValidateResponse(queryResponse.header, sizeof(queryResponse),
+                          queryRequest.request_id, "QUERY_CAPS") ||
+        queryResponse.header.operation_status != static_cast<NTSTATUS>(0))
+    {
+        std::printf("QUERY_CAPS failed (Win32 error %lu)\n", GetLastError());
+        CleanupDevice();
+        return false;
+    }
 
-	status = RegCreateKeyW(svcRoot, svcName.c_str(), &svcKey);
-	if (status)
-		return status;
+    constexpr uint32_t requiredCaps = PUBGEXT_CAP_AUTH | PUBGEXT_CAP_QUERY |
+                                       PUBGEXT_CAP_READ | PUBGEXT_CAP_WRITE |
+                                       PUBGEXT_CAP_VIRTUAL;
+    if ((queryResponse.caps & requiredCaps) != requiredCaps ||
+        queryResponse.max_transfer == 0)
+    {
+        std::printf("QUERY_CAPS reported unsupported capabilities\n");
+        CleanupDevice();
+        return false;
+    }
+    g_max_transfer = std::min<uint32_t>(queryResponse.max_transfer,
+                                        PUBGEXT_MAX_TRANSFER);
 
-	status = RegSetValueExW(
-		svcKey, L"ImagePath", 0, REG_SZ,
-		reinterpret_cast<const BYTE*>(wszLocalPath),
-		static_cast<DWORD>(sizeof(WCHAR) * (wcslen(wszLocalPath) + 1))
-	);
+    // AUTH is exactly the driver's 32-byte header request and 40-byte response.
+    PUBGEXT_REQUEST_HEADER authRequest = {};
+    InitializeRequestHeader(authRequest, sizeof(authRequest));
+    PUBGEXT_RESPONSE_HEADER authResponse = {};
+    returned = 0;
+    if (!DeviceIoControl(g_device, PUBGEXT_IOCTL_AUTH,
+                         &authRequest, sizeof(authRequest),
+                         &authResponse, sizeof(authResponse),
+                         &returned, nullptr) ||
+        returned < sizeof(authResponse) ||
+        !ValidateResponse(authResponse, sizeof(authResponse),
+                          authRequest.request_id, "AUTH") ||
+        authResponse.operation_status != static_cast<NTSTATUS>(0))
+    {
+        std::printf("AUTH failed (Win32 error %lu)\n", GetLastError());
+        CleanupDevice();
+        return false;
+    }
 
-	if (status)
-		return status;
-
-	DWORD32 self_pid = GetCurrentProcessId();
-
-	status = RegSetValueExW(svcKey, L"pid", 0, REG_DWORD, (BYTE*)&self_pid, sizeof(self_pid));
-
-	if (status)
-		return status;
-
-	return RegSetValueExW(svcKey, L"Type", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwType), sizeof(dwType));
+    std::printf("Connected: protocol %u.%u, max transfer %u bytes\n",
+                PUBGEXT_PROTOCOL_MAJOR, PUBGEXT_PROTOCOL_MINOR, g_max_transfer);
+    return true;
 }
 
-NTSTATUS LoadDriver(const std::wstring& svcName, const std::wstring& path)
+void CleanupDevice()
 {
-	UNICODE_STRING Ustr;
-
-	// If path is empty then attempt to start existing service
-	if (!path.empty() && PrepareDriverRegEntry(svcName, path) != 0)
-	{
-		printf("Driver not found");
-		return -1;
-	}
-
-	std::wstring regPath = L"\\registry\\machine\\SYSTEM\\CurrentControlSet\\Services\\" + svcName;
-	RtlInitUnicodeString(&Ustr, regPath.c_str());
-
-	return NtLoadDriver(&Ustr);
+    if (g_device != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(g_device);
+        g_device = INVALID_HANDLE_VALUE;
+    }
+    g_max_transfer = 0;
 }
 
-BOOL SeLoadDriverPrivilege() 
+NTSTATUS KeReadVirtualMemory(uintptr_t pid, unsigned char* source,
+                             uintptr_t destination, SIZE_T size,
+                             SIZE_T* transferredOut)
 {
-	TOKEN_PRIVILEGES tp;
-	LUID luid;
-	HANDLE hToken = 0;
+    if (transferredOut)
+        *transferredOut = 0;
+    if (g_device == INVALID_HANDLE_VALUE || !pid || !source || !destination || !size)
+        return kStatusUnsuccessful;
 
-	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &hToken) || !hToken)
-		return false;
+    const size_t chunkLimit = TransferChunkSize();
+    if (!chunkLimit)
+        return kStatusUnsuccessful;
 
-	if (!LookupPrivilegeValueA(NULL, "SeLoadDriverPrivilege", &luid))
-	{
-		CloseHandle(hToken);
-		return FALSE;
-	}
+    size_t total = 0;
+    while (total < size)
+    {
+        const size_t chunk = std::min(chunkLimit, size - total);
+        const uintptr_t remote = reinterpret_cast<uintptr_t>(source);
+        if (total > std::numeric_limits<uintptr_t>::max() - remote)
+            break;
 
-	tp.PrivilegeCount = 1;
-	tp.Privileges[0].Luid = luid;
-	tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        PUBGEXT_READ_REQUEST request = {};
+        InitializeRequestHeader(request.header, sizeof(request));
+        request.pid = static_cast<uint32_t>(pid);
+        request.remote_va = static_cast<uint64_t>(remote + total);
+        request.length = static_cast<uint32_t>(chunk);
 
-	if (!AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(TOKEN_PRIVILEGES), (PTOKEN_PRIVILEGES)NULL, (PDWORD)NULL))
-	{
-		CloseHandle(hToken);
-		return FALSE;
-	}
+        std::vector<unsigned char> output(sizeof(PUBGEXT_RESPONSE_HEADER) + chunk);
+        DWORD returned = 0;
+        if (!DeviceIoControl(g_device, PUBGEXT_IOCTL_READ,
+                             &request, sizeof(request),
+                             output.data(), static_cast<DWORD>(output.size()),
+                             &returned, nullptr))
+            return IoctlFailure("READ");
+        if (returned < sizeof(PUBGEXT_RESPONSE_HEADER))
+            return kStatusUnsuccessful;
 
-	if (GetLastError() == ERROR_NOT_ALL_ASSIGNED)
-	{
-		CloseHandle(hToken);
-		return FALSE;
-	}
+        const auto* response = reinterpret_cast<const PUBGEXT_RESPONSE_HEADER*>(output.data());
+        if (!ValidateResponse(*response, sizeof(PUBGEXT_RESPONSE_HEADER),
+                              request.header.request_id, "READ") ||
+            response->transferred > chunk ||
+            response->transferred > returned - sizeof(PUBGEXT_RESPONSE_HEADER))
+            return kStatusUnsuccessful;
 
-	CloseHandle(hToken);
+        const size_t done = static_cast<size_t>(response->transferred);
+        if (done)
+        {
+            std::memcpy(reinterpret_cast<unsigned char*>(destination) + total,
+                        output.data() + sizeof(PUBGEXT_RESPONSE_HEADER), done);
+            total += done;
+        }
 
-	return TRUE;
+        const NTSTATUS operationStatus = static_cast<NTSTATUS>(response->operation_status);
+        if (!NtSucceeded(operationStatus))
+        {
+            if (operationStatus == kStatusPartialCopy)
+                std::printf("READ returned STATUS_PARTIAL_COPY (%zu/%zu bytes)\n", done, chunk);
+            break;
+        }
+        if (done != chunk)
+            break;
+    }
+
+    if (transferredOut)
+        *transferredOut = total;
+    return total == size ? static_cast<NTSTATUS>(0) : kStatusPartialCopy;
 }
 
-NTSTATUS KeWriteVirtualMemory(uintptr_t pid, unsigned char* source, uintptr_t destination, SIZE_T size)
+NTSTATUS KeWriteVirtualMemory(uintptr_t pid, unsigned char* source,
+                              uintptr_t destination, SIZE_T size,
+                              SIZE_T* transferredOut)
 {
-	Command cmd = {};
-	cmd.op = COMMAND_READWRITE;
-	cmd.flags = COMMAND_FLAG_WRITE;
-	cmd.pid = pid;
-	cmd.src = reinterpret_cast<uintptr_t>(source);
-	cmd.dst = destination;
-	cmd.len = size;
+    if (transferredOut)
+        *transferredOut = 0;
+    if (g_device == INVALID_HANDLE_VALUE || !pid || !source || !destination || !size)
+        return kStatusUnsuccessful;
 
-#ifdef _DEBUG
-	printf("Status: 0x%x\n\n", cmd.status);
-#endif // DEBUG
+    const size_t chunkLimit = TransferChunkSize();
+    if (!chunkLimit)
+        return kStatusUnsuccessful;
 
-	return InvokeCommand(cmd);
-}
+    size_t total = 0;
+    while (total < size)
+    {
+        const size_t chunk = std::min(chunkLimit, size - total);
+        const uintptr_t remote = destination;
+        if (total > std::numeric_limits<uintptr_t>::max() - remote)
+            break;
 
-NTSTATUS KeReadVirtualMemory(uintptr_t pid, unsigned char* source, uintptr_t destination, SIZE_T size)
-{
-	Command cmd = {};
-	cmd.op = COMMAND_READWRITE;
-	cmd.pid = pid;
-	cmd.src = reinterpret_cast<uintptr_t>(source);
-	cmd.dst = destination;
-	cmd.len = size;
+        std::vector<unsigned char> input(PUBGEXT_WRITE_FIXED_SIZE + chunk);
+        auto* request = reinterpret_cast<PUBGEXT_WRITE_REQUEST*>(input.data());
+        InitializeRequestHeader(request->header, PUBGEXT_WRITE_FIXED_SIZE);
+        request->pid = static_cast<uint32_t>(pid);
+        request->remote_va = static_cast<uint64_t>(remote + total);
+        request->length = static_cast<uint32_t>(chunk);
+        std::memcpy(request->data, source + total, chunk);
 
-#ifdef DEBUG
-	printf("Status: 0x%x\n\n", cmd.status);
-#endif // DEBUG
+        PUBGEXT_RESPONSE_HEADER response = {};
+        DWORD returned = 0;
+        if (!DeviceIoControl(g_device, PUBGEXT_IOCTL_WRITE,
+                             input.data(), static_cast<DWORD>(input.size()),
+                             &response, sizeof(response),
+                             &returned, nullptr))
+            return IoctlFailure("WRITE");
+        if (returned < sizeof(response) ||
+            !ValidateResponse(response, sizeof(response),
+                              request->header.request_id, "WRITE") ||
+            response.transferred > chunk)
+            return kStatusUnsuccessful;
 
-	return InvokeCommand(cmd);
-}
+        total += static_cast<size_t>(response.transferred);
+        const NTSTATUS operationStatus = static_cast<NTSTATUS>(response.operation_status);
+        if (!NtSucceeded(operationStatus) || response.transferred != chunk)
+        {
+            if (operationStatus == kStatusPartialCopy)
+                std::printf("WRITE returned STATUS_PARTIAL_COPY (%llu/%zu bytes)\n",
+                            static_cast<unsigned long long>(response.transferred), chunk);
+            break;
+        }
+    }
 
-uintptr_t KeGetProcessPEB(uintptr_t pid)
-{
-	Command cmd = {};
-	cmd.op = COMMAND_GETPROCPID;
-	cmd.pid = pid;
-
-	if (!NT_SUCCESS(InvokeCommand(cmd)))
-		return 0;
-	return static_cast<uintptr_t>(cmd.result);
-}
-
-uintptr_t GetModuleBase(uintptr_t input_pid, uintptr_t input_peb, const wchar_t* name)
-{
-	PEB peb = { 0 };
-	KeReadVirtualMemory(input_pid, (unsigned char*)input_peb, (uintptr_t)&peb, sizeof(peb));
-
-	PEB_LDR_DATA ldr;
-	KeReadVirtualMemory(input_pid, (unsigned char*)peb.Ldr, (uintptr_t)&ldr, sizeof(ldr));
-
-	LDR_DATA_TABLE_ENTRY* pModEntry;
-	for (LIST_ENTRY* pCur = ldr.InMemoryOrderModuleList.Flink; (uint8_t*)pCur != (uint8_t*)peb.Ldr + offsetof(PEB_LDR_DATA, InMemoryOrderModuleList); pCur = pModEntry->InMemoryOrderLinks.Flink)
-	{
-		LDR_DATA_TABLE_ENTRY curData;
-		KeReadVirtualMemory(input_pid, (unsigned char*)pCur, (uintptr_t)&curData, sizeof(curData));
-
-		pModEntry = CONTAINING_RECORD(&curData, LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks);
-		if (pModEntry->BaseDllName.Buffer)
-		{
-			wchar_t wszBuff[260];
-			KeReadVirtualMemory(input_pid, (unsigned char*)pModEntry->BaseDllName.Buffer, (uintptr_t)wszBuff, (SIZE_T)(pModEntry->BaseDllName.Length + 2));
-
-			//printf("%p: %S\n", pModEntry->DllBase, wszBuff);
-
-			if (_wcsicmp(name, wszBuff) == 0)
-			{
-				return (uintptr_t)pModEntry->DllBase;
-				break;
-			}
-		}
-	}
-
-	return 0;
+    if (transferredOut)
+        *transferredOut = total;
+    return total == size ? static_cast<NTSTATUS>(0) : kStatusPartialCopy;
 }
 
 uintptr_t GetPIDByName(const wchar_t* name)
 {
-	PROCESSENTRY32 entry;
-	entry.dwSize = sizeof(PROCESSENTRY32);
+    if (!name || !*name)
+        return 0;
 
-	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, NULL);
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return 0;
 
-	if (Process32First(snapshot, &entry) == TRUE)
-	{
-		while (Process32Next(snapshot, &entry) == TRUE)
-		{
-			if (_wcsicmp(entry.szExeFile, name) == 0)
-			{
-				return entry.th32ProcessID;
-				break;
-			}
-		}
-	}
+    PROCESSENTRY32W entry = {};
+    entry.dwSize = sizeof(entry);
+    uintptr_t pid = 0;
+    if (Process32FirstW(snapshot, &entry))
+    {
+        do
+        {
+            if (_wcsicmp(entry.szExeFile, name) == 0)
+            {
+                pid = entry.th32ProcessID;
+                break;
+            }
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return pid;
+}
+
+uintptr_t GetModuleBase(uintptr_t input_pid, const wchar_t* name)
+{
+    if (!input_pid || !name || !*name)
+        return 0;
+
+    const HANDLE snapshot = CreateToolhelp32Snapshot(
+        TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, static_cast<DWORD>(input_pid));
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return 0;
+
+    MODULEENTRY32W entry = {};
+    entry.dwSize = sizeof(entry);
+    uintptr_t base = 0;
+    if (Module32FirstW(snapshot, &entry))
+    {
+        do
+        {
+            if (_wcsicmp(entry.szModule, name) == 0)
+            {
+                base = reinterpret_cast<uintptr_t>(entry.modBaseAddr);
+                break;
+            }
+        } while (Module32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return base;
+}
+
+bool RunDriverSmokeTest()
+{
+    if (!InitializeDevice())
+        return false;
+
+    uint64_t value = 0x1122334455667788ull;
+    uint64_t observed = 0;
+    const uintptr_t pid = GetCurrentProcessId();
+    SIZE_T transferred = 0;
+    const NTSTATUS readStatus = KeReadVirtualMemory(
+        pid, reinterpret_cast<unsigned char*>(&value),
+        reinterpret_cast<uintptr_t>(&observed), sizeof(observed), &transferred);
+    if (readStatus != static_cast<NTSTATUS>(0) || observed != value)
+    {
+        std::printf("READ smoke test failed: status 0x%08X, bytes: %zu\n",
+                    static_cast<unsigned int>(readStatus), transferred);
+        return false;
+    }
+
+    const uint64_t replacement = 0x8877665544332211ull;
+    const NTSTATUS writeStatus = KeWriteVirtualMemory(
+        pid, reinterpret_cast<unsigned char*>(const_cast<uint64_t*>(&replacement)),
+        reinterpret_cast<uintptr_t>(&value), sizeof(replacement), &transferred);
+    if (writeStatus != static_cast<NTSTATUS>(0) || value != replacement)
+    {
+        std::printf("WRITE smoke test failed: status 0x%08X, bytes: %zu\n",
+                    static_cast<unsigned int>(writeStatus), transferred);
+        return false;
+    }
+
+    std::printf("QUERY_CAPS -> AUTH -> READ -> WRITE smoke test passed\n");
+    return true;
 }
 
 int main()
 {
-	LoadLibrary(L"user32.dll");
-	NtUserSetSysColors = (NtUserSetSysColors_t)GetProcAddress(LoadLibrary(L"win32u.dll"), "NtUserSetSysColors");
-	aNewColors[0] = RGB(0x80, 0x00, 0x80);
+    char input = 0;
+    std::printf("1) Connect and run IOCTL smoke test\n");
+    std::printf("2) Find notepad.exe by name\n");
+    std::printf("3) Halo MCC\n");
+    std::printf("4) Apex Legends\n");
 
-	char input = 0;
-	printf("1) Load driver\n");
-	printf("2) Test Function\n");
-	printf("3) Halo MCC\n");
-	printf("4) Apex Legends\n");
-	
-	while (true)
-	{
-		scanf("%c", &input);
-		fflush(stdin);
+    while (true)
+    {
+        if (scanf_s(" %c", &input, 1) != 1)
+            break;
 
-		if (input == '1')
-		{
-			if (!SeLoadDriverPrivilege())
-				return 0;
+        if (input == '1')
+        {
+            RunDriverSmokeTest();
+        }
+        else if (input == '2')
+        {
+            const uintptr_t pid = GetPIDByName(L"notepad.exe");
+            std::printf("notepad.exe PID: %llu\n",
+                        static_cast<unsigned long long>(pid));
+        }
+        else if (input == '3')
+        {
+            if (InitializeDevice())
+                Halo();
+        }
+        else if (input == '4')
+        {
+            if (InitializeDevice())
+                Apex();
+        }
+    }
 
-			wchar_t buffer[MAX_PATH];
-			GetModuleFileName(NULL, buffer, MAX_PATH);
-			std::wstring::size_type pos = std::wstring(buffer).find_last_of(L"\\/");
-			std::wstring bg = std::wstring(buffer).substr(0, pos);
-			bg += L"\\ReadWriteDriverMapper.sys";
-
-			NTSTATUS a = LoadDriver(L"ReadWriteDriver", bg.c_str());
-			if (NT_SUCCESS(a) || a == STATUS_CONNECTION_ACTIVE)
-			{
-				Command handshake = {};
-				handshake.op = COMMAND_ISLOADED;
-				const NTSTATUS handshakeStatus = InvokeCommand(handshake);
-				if (NT_SUCCESS(handshakeStatus))
-					g_session_token = handshake.auth_token;
-				else
-					a = handshakeStatus;
-			}
-
-			RegDeleteKey(svcRoot, L"ReadWriteDriver");
-
-			DeleteFile(L"ReadWriteDriverMapper.sys");
-
-			printf("NSTATUS Result: 0x%x\n", a);
-		}
-		else if (input == '2')
-		{
-			uintptr_t pid = GetPIDByName(L"notepad.exe");
-			uintptr_t notepad_base = GetModuleBase(pid, KeGetProcessPEB(pid), L"notepad.exe");
-			printf("Notepad Base: 0x%p\n", notepad_base);
-
-			__int64 writeVal = 0xBADC0FFEE0DDF00D;
-			KeWriteVirtualMemory(pid, (unsigned char*)&writeVal, notepad_base, sizeof(writeVal));
-
-			__int64 readVal;
-			KeReadVirtualMemory(pid, (unsigned char*)notepad_base, (uintptr_t)&readVal, sizeof(writeVal));
-			printf("Read value: 0x%p\n", readVal);
-
-			uintptr_t PEBAddress = KeGetProcessPEB(pid);			
-			printf("PEB Address: 0x%p\n", PEBAddress);
-
-			printf("ntdll.dll Address: 0x%p\n", GetModuleBase(pid, PEBAddress, L"ntdll.dll"));
-		}
-		else if (input == '3')
-		{
-			Halo();
-		}
-		else if (input == '4')
-		{
-			Apex();
-		}
-	}
-
-	getchar();
-	getchar();
+    CleanupDevice();
+    return 0;
 }

@@ -36,7 +36,7 @@ uintptr_t GetEntityById(uintptr_t pid, int Ent, uintptr_t Base)
 int Apex()
 {
     uintptr_t pid = GetPIDByName(L"r5apex.exe");
-    uintptr_t apex_base = GetModuleBase(pid, KeGetProcessPEB(pid), L"r5apex.exe");
+    uintptr_t apex_base = GetModuleBase(pid, L"r5apex.exe");
 
     while (true)
     {

@@ -1,17 +1,15 @@
 #pragma once
 
-// Read/write transport for ReadWriteDriver.  The implementation delegates to
-// the driver's win32kbase NtUserSetSysColors hook rather than a device handle.
-//
-// ReadWriteDriver currently supports only Windows 10 21H1 build 19043 and
-// hardcodes win32kbase+0x2B3C90 for that exact build.
+// Read/write transport for ReadWriteDriver's \\Device\\PubgExtRw interface.
+// The DOS device is ACL'd to SYSTEM and built-in Administrators (SY/BA), so
+// the application must run elevated. No legacy hook or session token is used.
 
 #include <Windows.h>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 
-#include "common.h"
+#include "ioctl_protocol.h"
 
 class DriverInterfaceV3
 {
@@ -22,6 +20,7 @@ public:
         size_t size{};
         void* buffer{};
         bool success{ false };
+        size_t transferred{ 0 };
     };
 
     bool Initialize();
@@ -32,15 +31,12 @@ public:
     uintptr_t GetModuleBase(DWORD pid, const wchar_t* moduleName) const;
     void SetBaseAddress(uintptr_t baseAddress);
 
-    uintptr_t FindRealCr3(DWORD pid, uintptr_t baseAddress, uintptr_t dataAnchor) const;
-    uintptr_t GetProcessCr3(DWORD pid) const;
-
     bool ReadMemory(DWORD pid, uintptr_t address, void* buffer, size_t size,
-                    const char* debugName = nullptr) const;
+                    const char* debugName = nullptr,
+                    size_t* bytesTransferred = nullptr) const;
     bool WriteMemory(DWORD pid, uintptr_t address, const void* buffer, size_t size,
-                     const char* debugName = nullptr) const;
-    // TODO: FindRealCr3/GetProcessCr3 remain public for compatibility, but
-    // have no functional consumer until CR3 is exposed by the shared command.
+                     const char* debugName = nullptr,
+                     size_t* bytesTransferred = nullptr) const;
     bool BatchReadMemory(DWORD pid, BatchReadEntry* entries, size_t count,
                          size_t* successfulCount = nullptr) const;
 
@@ -51,5 +47,7 @@ private:
     DWORD currentPid_{ 0 };
     uintptr_t baseAddress_{ 0 };
     bool driverLoaded_{ false };
-    uint64_t sessionToken_{ 0 };
+    HANDLE device_{ INVALID_HANDLE_VALUE };
+    uint32_t maxTransfer_{ 0 };
+    mutable std::atomic<uint64_t> nextRequestId_{ 1 };
 };

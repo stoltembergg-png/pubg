@@ -1,0 +1,822 @@
+﻿{
+    "errors":  [
+
+               ],
+    "events":  [
+                   "Preserved validated value offline: MmAllocateIndependentPages",
+                   "Preserved validated value offline: MmFreeIndependentPages",
+                   "Preserved validated value offline: MmSetPageProtection"
+               ],
+    "generated_by":  "tools/profiles/extract_profile.py",
+    "machine":  {
+                    "display_version":  "25H2",
+                    "os_version":  "26200"
+                },
+    "modules":  {
+                    "ntoskrnl.exe":  {
+                                         "check_sum":  13113301,
+                                         "check_sum_hex":  "0xC817D5",
+                                         "codeview":  {
+                                                          "age":  1,
+                                                          "guid":  "C29EBFB0-6B78-B3C0-20DC-A66D99713F9E",
+                                                          "guid_age":  "C29EBFB06B78B3C020DCA66D99713F9E1",
+                                                          "pdb":  "ntkrnlmp.pdb"
+                                                      },
+                                         "file_size":  13104632,
+                                         "file_version":  "10.0.26100.9457",
+                                         "name":  "ntoskrnl.exe",
+                                         "path":  "C:\\Windows\\System32\\ntoskrnl.exe",
+                                         "sections":  [
+                                                          {
+                                                              "characteristics":  "0x48000040",
+                                                              "name":  ".rdata",
+                                                              "raw_size":  913408,
+                                                              "rva":  "0x1000",
+                                                              "virtual_size":  911872
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x48000040",
+                                                              "name":  ".pdata",
+                                                              "raw_size":  458752,
+                                                              "rva":  "0xE0000",
+                                                              "virtual_size":  454920
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x48000040",
+                                                              "name":  ".idata",
+                                                              "raw_size":  12288,
+                                                              "rva":  "0x150000",
+                                                              "virtual_size":  10620
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x40000040",
+                                                              "name":  ".edata",
+                                                              "raw_size":  114688,
+                                                              "rva":  "0x153000",
+                                                              "virtual_size":  111705
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x48000040",
+                                                              "name":  "PROTDATA",
+                                                              "raw_size":  4096,
+                                                              "rva":  "0x16F000",
+                                                              "virtual_size":  1
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x42000040",
+                                                              "name":  "GFIDS",
+                                                              "raw_size":  45056,
+                                                              "rva":  "0x170000",
+                                                              "virtual_size":  43780
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x42000080",
+                                                              "name":  "Pad1",
+                                                              "raw_size":  0,
+                                                              "rva":  "0x17B000",
+                                                              "virtual_size":  544768
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x68000020",
+                                                              "name":  ".text",
+                                                              "raw_size":  5226496,
+                                                              "rva":  "0x200000",
+                                                              "virtual_size":  5223901
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x60000020",
+                                                              "name":  "PAGE",
+                                                              "raw_size":  4575232,
+                                                              "rva":  "0x6FC000",
+                                                              "virtual_size":  4572768
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x60000020",
+                                                              "name":  "PAGELK",
+                                                              "raw_size":  159744,
+                                                              "rva":  "0xB59000",
+                                                              "virtual_size":  156956
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x68000020",
+                                                              "name":  "POOLCODE",
+                                                              "raw_size":  12288,
+                                                              "rva":  "0xB80000",
+                                                              "virtual_size":  9513
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x60000020",
+                                                              "name":  "PAGEKD",
+                                                              "raw_size":  24576,
+                                                              "rva":  "0xB83000",
+                                                              "virtual_size":  24036
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x60000020",
+                                                              "name":  "PAGEVRFY",
+                                                              "raw_size":  204800,
+                                                              "rva":  "0xB89000",
+                                                              "virtual_size":  202025
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x60000020",
+                                                              "name":  "PAGEHDLS",
+                                                              "raw_size":  12288,
+                                                              "rva":  "0xBBB000",
+                                                              "virtual_size":  9082
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x60000020",
+                                                              "name":  "PAGEBGFX",
+                                                              "raw_size":  28672,
+                                                              "rva":  "0xBBE000",
+                                                              "virtual_size":  26980
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x68000020",
+                                                              "name":  "TRACESUP",
+                                                              "raw_size":  8192,
+                                                              "rva":  "0xBC5000",
+                                                              "virtual_size":  6563
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x60000020",
+                                                              "name":  "PAGECMRC",
+                                                              "raw_size":  8192,
+                                                              "rva":  "0xBC7000",
+                                                              "virtual_size":  4173
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x68000020",
+                                                              "name":  "KVASCODE",
+                                                              "raw_size":  12288,
+                                                              "rva":  "0xBC9000",
+                                                              "virtual_size":  9368
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x68000020",
+                                                              "name":  "KSCP",
+                                                              "raw_size":  4096,
+                                                              "rva":  "0xBCC000",
+                                                              "virtual_size":  2112
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x68000020",
+                                                              "name":  "DRVPRX",
+                                                              "raw_size":  4096,
+                                                              "rva":  "0xBCD000",
+                                                              "virtual_size":  183
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x68000020",
+                                                              "name":  "fothk",
+                                                              "raw_size":  4096,
+                                                              "rva":  "0xBCE000",
+                                                              "virtual_size":  4096
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x68000020",
+                                                              "name":  "INITKDBG",
+                                                              "raw_size":  106496,
+                                                              "rva":  "0xBCF000",
+                                                              "virtual_size":  105526
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x62000020",
+                                                              "name":  "MINIEX",
+                                                              "raw_size":  12288,
+                                                              "rva":  "0xBE9000",
+                                                              "virtual_size":  9916
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x62000020",
+                                                              "name":  "INIT",
+                                                              "raw_size":  667648,
+                                                              "rva":  "0xBEC000",
+                                                              "virtual_size":  666652
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x62000080",
+                                                              "name":  "Pad2",
+                                                              "raw_size":  0,
+                                                              "rva":  "0xC8F000",
+                                                              "virtual_size":  1511424
+                                                          },
+                                                          {
+                                                              "characteristics":  "0xC8000040",
+                                                              "name":  ".data",
+                                                              "raw_size":  65536,
+                                                              "rva":  "0xE00000",
+                                                              "virtual_size":  1852424
+                                                          },
+                                                          {
+                                                              "characteristics":  "0xC8000040",
+                                                              "name":  "ALMOSTRO",
+                                                              "raw_size":  8192,
+                                                              "rva":  "0xFC5000",
+                                                              "virtual_size":  40128
+                                                          },
+                                                          {
+                                                              "characteristics":  "0xC8000040",
+                                                              "name":  "CACHEALI",
+                                                              "raw_size":  4096,
+                                                              "rva":  "0xFCF000",
+                                                              "virtual_size":  36224
+                                                          },
+                                                          {
+                                                              "characteristics":  "0xC0000040",
+                                                              "name":  "PAGEDATA",
+                                                              "raw_size":  8192,
+                                                              "rva":  "0xFD8000",
+                                                              "virtual_size":  111712
+                                                          },
+                                                          {
+                                                              "characteristics":  "0xC0000040",
+                                                              "name":  "PAGEVRFD",
+                                                              "raw_size":  40960,
+                                                              "rva":  "0xFF4000",
+                                                              "virtual_size":  80976
+                                                          },
+                                                          {
+                                                              "characteristics":  "0xC2000020",
+                                                              "name":  "INITDATA",
+                                                              "raw_size":  4096,
+                                                              "rva":  "0x1008000",
+                                                              "virtual_size":  136372
+                                                          },
+                                                          {
+                                                              "characteristics":  "0xC2000080",
+                                                              "name":  "Pad3",
+                                                              "raw_size":  0,
+                                                              "rva":  "0x102A000",
+                                                              "virtual_size":  1925120
+                                                          },
+                                                          {
+                                                              "characteristics":  "0xC8000040",
+                                                              "name":  "CFGRO",
+                                                              "raw_size":  12288,
+                                                              "rva":  "0x1200000",
+                                                              "virtual_size":  8256
+                                                          },
+                                                          {
+                                                              "characteristics":  "0xCA000080",
+                                                              "name":  "Pad4",
+                                                              "raw_size":  0,
+                                                              "rva":  "0x1203000",
+                                                              "virtual_size":  2084864
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x42000040",
+                                                              "name":  ".rsrc",
+                                                              "raw_size":  233472,
+                                                              "rva":  "0x1400000",
+                                                              "virtual_size":  232964
+                                                          },
+                                                          {
+                                                              "characteristics":  "0x42000040",
+                                                              "name":  ".reloc",
+                                                              "raw_size":  94208,
+                                                              "rva":  "0x1439000",
+                                                              "virtual_size":  91460
+                                                          }
+                                                      ],
+                                         "size_of_image":  21299200,
+                                         "size_of_image_hex":  "0x1450000",
+                                         "time_date_stamp":  4255772020,
+                                         "time_date_stamp_hex":  "0xFDA9ED74"
+                                     },
+                    "win32k.sys":  {
+                                       "check_sum":  852199,
+                                       "check_sum_hex":  "0xD00E7",
+                                       "codeview":  {
+                                                        "age":  1,
+                                                        "guid":  "4ED02936-C177-A630-010F-25DDBA765E6A",
+                                                        "guid_age":  "4ED02936C177A630010F25DDBA765E6A1",
+                                                        "pdb":  "win32k.pdb"
+                                                    },
+                                       "file_size":  812496,
+                                       "file_version":  "10.0.26100.9444",
+                                       "name":  "win32k.sys",
+                                       "path":  "C:\\Windows\\System32\\win32k.sys",
+                                       "sections":  [
+                                                        {
+                                                            "characteristics":  "0x68000020",
+                                                            "name":  ".text",
+                                                            "raw_size":  450560,
+                                                            "rva":  "0x1000",
+                                                            "virtual_size":  449143
+                                                        },
+                                                        {
+                                                            "characteristics":  "0x68000020",
+                                                            "name":  "fothk",
+                                                            "raw_size":  4096,
+                                                            "rva":  "0x6F000",
+                                                            "virtual_size":  4096
+                                                        },
+                                                        {
+                                                            "characteristics":  "0x48000040",
+                                                            "name":  ".rdata",
+                                                            "raw_size":  53248,
+                                                            "rva":  "0x70000",
+                                                            "virtual_size":  50864
+                                                        },
+                                                        {
+                                                            "characteristics":  "0xC8000040",
+                                                            "name":  ".data",
+                                                            "raw_size":  45056,
+                                                            "rva":  "0x7D000",
+                                                            "virtual_size":  56400
+                                                        },
+                                                        {
+                                                            "characteristics":  "0x48000040",
+                                                            "name":  ".pdata",
+                                                            "raw_size":  61440,
+                                                            "rva":  "0x8B000",
+                                                            "virtual_size":  58536
+                                                        },
+                                                        {
+                                                            "characteristics":  "0x48000040",
+                                                            "name":  ".idata",
+                                                            "raw_size":  20480,
+                                                            "rva":  "0x9A000",
+                                                            "virtual_size":  17910
+                                                        },
+                                                        {
+                                                            "characteristics":  "0x48000040",
+                                                            "name":  "TABLERO",
+                                                            "raw_size":  20480,
+                                                            "rva":  "0x9F000",
+                                                            "virtual_size":  18036
+                                                        },
+                                                        {
+                                                            "characteristics":  "0x60000020",
+                                                            "name":  "PAGE",
+                                                            "raw_size":  4096,
+                                                            "rva":  "0xA4000",
+                                                            "virtual_size":  1243
+                                                        },
+                                                        {
+                                                            "characteristics":  "0x40000040",
+                                                            "name":  ".edata",
+                                                            "raw_size":  86016,
+                                                            "rva":  "0xA5000",
+                                                            "virtual_size":  85047
+                                                        },
+                                                        {
+                                                            "characteristics":  "0x62000020",
+                                                            "name":  "INIT",
+                                                            "raw_size":  4096,
+                                                            "rva":  "0xBA000",
+                                                            "virtual_size":  1348
+                                                        },
+                                                        {
+                                                            "characteristics":  "0x42000040",
+                                                            "name":  "GFIDS",
+                                                            "raw_size":  12288,
+                                                            "rva":  "0xBB000",
+                                                            "virtual_size":  8908
+                                                        },
+                                                        {
+                                                            "characteristics":  "0x42000040",
+                                                            "name":  ".rsrc",
+                                                            "raw_size":  4096,
+                                                            "rva":  "0xBE000",
+                                                            "virtual_size":  1024
+                                                        },
+                                                        {
+                                                            "characteristics":  "0x42000040",
+                                                            "name":  ".reloc",
+                                                            "raw_size":  32768,
+                                                            "rva":  "0xBF000",
+                                                            "virtual_size":  31728
+                                                        }
+                                                    ],
+                                       "size_of_image":  815104,
+                                       "size_of_image_hex":  "0xC7000",
+                                       "time_date_stamp":  274259579,
+                                       "time_date_stamp_hex":  "0x1058DE7B"
+                                   },
+                    "win32kbase.sys":  {
+                                           "check_sum":  3473987,
+                                           "check_sum_hex":  "0x350243",
+                                           "codeview":  {
+                                                            "age":  1,
+                                                            "guid":  "D22DFDA3-D54B-87E6-BD05-67A57877904C",
+                                                            "guid_age":  "D22DFDA3D54B87E6BD0567A57877904C1",
+                                                            "pdb":  "win32kbase.pdb"
+                                                        },
+                                           "file_size":  3420160,
+                                           "file_version":  "10.0.26100.9444",
+                                           "name":  "win32kbase.sys",
+                                           "path":  "C:\\Windows\\System32\\win32kbase.sys",
+                                           "sections":  [
+                                                            {
+                                                                "characteristics":  "0x68000020",
+                                                                "name":  ".text",
+                                                                "raw_size":  2437120,
+                                                                "rva":  "0x1000",
+                                                                "virtual_size":  2433135
+                                                            },
+                                                            {
+                                                                "characteristics":  "0x68000020",
+                                                                "name":  "fothk",
+                                                                "raw_size":  4096,
+                                                                "rva":  "0x254000",
+                                                                "virtual_size":  4096
+                                                            },
+                                                            {
+                                                                "characteristics":  "0x48000040",
+                                                                "name":  ".rdata",
+                                                                "raw_size":  364544,
+                                                                "rva":  "0x255000",
+                                                                "virtual_size":  361744
+                                                            },
+                                                            {
+                                                                "characteristics":  "0xC8000040",
+                                                                "name":  ".data",
+                                                                "raw_size":  8192,
+                                                                "rva":  "0x2AE000",
+                                                                "virtual_size":  19216
+                                                            },
+                                                            {
+                                                                "characteristics":  "0x48000040",
+                                                                "name":  ".pdata",
+                                                                "raw_size":  114688,
+                                                                "rva":  "0x2B3000",
+                                                                "virtual_size":  114324
+                                                            },
+                                                            {
+                                                                "characteristics":  "0x48000040",
+                                                                "name":  ".idata",
+                                                                "raw_size":  28672,
+                                                                "rva":  "0x2CF000",
+                                                                "virtual_size":  26360
+                                                            },
+                                                            {
+                                                                "characteristics":  "0xC8000040",
+                                                                "name":  "NONPAGE",
+                                                                "raw_size":  4096,
+                                                                "rva":  "0x2D6000",
+                                                                "virtual_size":  176
+                                                            },
+                                                            {
+                                                                "characteristics":  "0x60000020",
+                                                                "name":  "PAGE",
+                                                                "raw_size":  8192,
+                                                                "rva":  "0x2D7000",
+                                                                "virtual_size":  6823
+                                                            },
+                                                            {
+                                                                "characteristics":  "0x40000040",
+                                                                "name":  ".edata",
+                                                                "raw_size":  118784,
+                                                                "rva":  "0x2D9000",
+                                                                "virtual_size":  118360
+                                                            },
+                                                            {
+                                                                "characteristics":  "0x62000020",
+                                                                "name":  "INIT",
+                                                                "raw_size":  24576,
+                                                                "rva":  "0x2F6000",
+                                                                "virtual_size":  21037
+                                                            },
+                                                            {
+                                                                "characteristics":  "0xC2000040",
+                                                                "name":  "INIT",
+                                                                "raw_size":  4096,
+                                                                "rva":  "0x2FC000",
+                                                                "virtual_size":  5
+                                                            },
+                                                            {
+                                                                "characteristics":  "0x42000040",
+                                                                "name":  "GFIDS",
+                                                                "raw_size":  20480,
+                                                                "rva":  "0x2FD000",
+                                                                "virtual_size":  17360
+                                                            },
+                                                            {
+                                                                "characteristics":  "0x42000040",
+                                                                "name":  ".rsrc",
+                                                                "raw_size":  176128,
+                                                                "rva":  "0x302000",
+                                                                "virtual_size":  174984
+                                                            },
+                                                            {
+                                                                "characteristics":  "0x42000040",
+                                                                "name":  ".reloc",
+                                                                "raw_size":  102400,
+                                                                "rva":  "0x32D000",
+                                                                "virtual_size":  100256
+                                                            }
+                                                        ],
+                                           "size_of_image":  3432448,
+                                           "size_of_image_hex":  "0x346000",
+                                           "time_date_stamp":  450960370,
+                                           "time_date_stamp_hex":  "0x1AE11BF2"
+                                       },
+                    "win32kfull.sys":  {
+                                           "check_sum":  4426398,
+                                           "check_sum_hex":  "0x438A9E",
+                                           "codeview":  {
+                                                            "age":  1,
+                                                            "guid":  "5CD57181-BCFD-C5AE-8F48-19BEB1196F09",
+                                                            "guid_age":  "5CD57181BCFDC5AE8F4819BEB1196F091",
+                                                            "pdb":  "win32kfull.pdb"
+                                                        },
+                                           "file_size":  4390912,
+                                           "file_version":  "10.0.26100.9444",
+                                           "name":  "win32kfull.sys",
+                                           "path":  "C:\\Windows\\System32\\win32kfull.sys",
+                                           "sections":  [
+                                                            {
+                                                                "characteristics":  "0x68000020",
+                                                                "name":  ".text",
+                                                                "raw_size":  3551232,
+                                                                "rva":  "0x1000",
+                                                                "virtual_size":  3550323
+                                                            },
+                                                            {
+                                                                "characteristics":  "0x68000020",
+                                                                "name":  "fothk",
+                                                                "raw_size":  4096,
+                                                                "rva":  "0x364000",
+                                                                "virtual_size":  4096
+                                                            },
+                                                            {
+                                                                "characteristics":  "0x48000040",
+                                                                "name":  ".rdata",
+                                                                "raw_size":  315392,
+                                                                "rva":  "0x365000",
+                                                                "virtual_size":  313408
+                                                            },
+                                                            {
+                                                                "characteristics":  "0xC8000040",
+                                                                "name":  ".data",
+                                                                "raw_size":  20480,
+                                                                "rva":  "0x3B2000",
+                                                                "virtual_size":  23768
+                                                            },
+                                                            {
+                                                                "characteristics":  "0x48000040",
+                                                                "name":  ".pdata",
+                                                                "raw_size":  126976,
+                                                                "rva":  "0x3B8000",
+                                                                "virtual_size":  126576
+                                                            },
+                                                            {
+                                                                "characteristics":  "0x48000040",
+                                                                "name":  ".idata",
+                                                                "raw_size":  90112,
+                                                                "rva":  "0x3D7000",
+                                                                "virtual_size":  88412
+                                                            },
+                                                            {
+                                                                "characteristics":  "0xC8000040",
+                                                                "name":  "NONPAGE",
+                                                                "raw_size":  4096,
+                                                                "rva":  "0x3ED000",
+                                                                "virtual_size":  176
+                                                            },
+                                                            {
+                                                                "characteristics":  "0x60000020",
+                                                                "name":  "PAGE",
+                                                                "raw_size":  8192,
+                                                                "rva":  "0x3EE000",
+                                                                "virtual_size":  6605
+                                                            },
+                                                            {
+                                                                "characteristics":  "0x40000040",
+                                                                "name":  ".edata",
+                                                                "raw_size":  94208,
+                                                                "rva":  "0x3F0000",
+                                                                "virtual_size":  91580
+                                                            },
+                                                            {
+                                                                "characteristics":  "0x62000020",
+                                                                "name":  "INIT",
+                                                                "raw_size":  12288,
+                                                                "rva":  "0x407000",
+                                                                "virtual_size":  10884
+                                                            },
+                                                            {
+                                                                "characteristics":  "0x42000040",
+                                                                "name":  "GFIDS",
+                                                                "raw_size":  16384,
+                                                                "rva":  "0x40A000",
+                                                                "virtual_size":  13816
+                                                            },
+                                                            {
+                                                                "characteristics":  "0x42000040",
+                                                                "name":  ".rsrc",
+                                                                "raw_size":  4096,
+                                                                "rva":  "0x40E000",
+                                                                "virtual_size":  1056
+                                                            },
+                                                            {
+                                                                "characteristics":  "0x42000040",
+                                                                "name":  ".reloc",
+                                                                "raw_size":  139264,
+                                                                "rva":  "0x40F000",
+                                                                "virtual_size":  139152
+                                                            }
+                                                        ],
+                                           "size_of_image":  4395008,
+                                           "size_of_image_hex":  "0x431000",
+                                           "time_date_stamp":  2737235227,
+                                           "time_date_stamp_hex":  "0xA326E51B"
+                                       }
+                },
+    "profile_id":  "ntoskrnl_10.0.26100.9457_FDA9ED74",
+    "schema_version":  1,
+    "values":  {
+                   "EPROCESS.DirectoryTableBase":  {
+                                                       "confidence":  "UNKNOWN",
+                                                       "evidence":  "SymGetTypeFromName/SymGetTypeInfo did not expose field",
+                                                       "method":  "unavailable",
+                                                       "offset_hex":  null,
+                                                       "validation":  {
+                                                                          "reason":  "not extracted",
+                                                                          "valid":  false
+                                                                      },
+                                                       "value":  null
+                                                   },
+                   "EPROCESS.UserDirectoryTableBase":  {
+                                                           "confidence":  "UNKNOWN",
+                                                           "evidence":  "SymGetTypeFromName/SymGetTypeInfo did not expose field",
+                                                           "method":  "unavailable",
+                                                           "offset_hex":  null,
+                                                           "validation":  {
+                                                                              "reason":  "not extracted",
+                                                                              "valid":  false
+                                                                          },
+                                                           "value":  null
+                                                       },
+                   "MmAllocateIndependentPages":  {
+                                                      "confidence":  "high",
+                                                      "evidence":  "pdbparse PDBGlobalSymbolStream (exact unique symbol)",
+                                                      "method":  "pdb",
+                                                      "name":  "MmAllocateIndependentPages",
+                                                      "rva":  11158176,
+                                                      "rva_hex":  "0xAA42A0",
+                                                      "section":  {
+                                                                      "executable":  true,
+                                                                      "kind":  "code",
+                                                                      "name":  "PAGE",
+                                                                      "rva_end":  "0xB59000",
+                                                                      "rva_start":  "0x6FC000",
+                                                                      "writable":  false
+                                                                  },
+                                                      "validation":  {
+                                                                         "reason":  "RVA is in executable section",
+                                                                         "valid":  true
+                                                                     },
+                                                      "value":  11158176
+                                                  },
+                   "MmFreeIndependentPages":  {
+                                                  "confidence":  "high",
+                                                  "evidence":  "pdbparse PDBGlobalSymbolStream (exact unique symbol)",
+                                                  "method":  "pdb",
+                                                  "name":  "MmFreeIndependentPages",
+                                                  "rva":  2123200,
+                                                  "rva_hex":  "0x2065C0",
+                                                  "section":  {
+                                                                  "executable":  true,
+                                                                  "kind":  "code",
+                                                                  "name":  ".text",
+                                                                  "rva_end":  "0x6FC000",
+                                                                  "rva_start":  "0x200000",
+                                                                  "writable":  false
+                                                              },
+                                                  "validation":  {
+                                                                     "reason":  "RVA is in executable section",
+                                                                     "valid":  true
+                                                                 },
+                                                  "value":  2123200
+                                              },
+                   "MmSetPageProtection":  {
+                                               "confidence":  "high",
+                                               "evidence":  "pdbparse PDBGlobalSymbolStream (exact unique symbol)",
+                                               "method":  "pdb",
+                                               "name":  "MmSetPageProtection",
+                                               "rva":  5136096,
+                                               "rva_hex":  "0x4E5EE0",
+                                               "section":  {
+                                                               "executable":  true,
+                                                               "kind":  "code",
+                                                               "name":  ".text",
+                                                               "rva_end":  "0x6FC000",
+                                                               "rva_start":  "0x200000",
+                                                               "writable":  false
+                                                           },
+                                               "validation":  {
+                                                                  "reason":  "RVA is in executable section",
+                                                                  "valid":  true
+                                                              },
+                                               "value":  5136096
+                                           },
+                   "NtUserSetSysColors_global_slot":  {
+                                                          "value":  null,
+                                                          "rva":  null,
+                                                          "rva_hex":  null,
+                                                          "module":  "win32kbase.sys",
+                                                          "kind":  "UNKNOWN",
+                                                          "section":  {
+                                                                          "name":  ".idata",
+                                                                          "rva_start":  "0x2CF000",
+                                                                          "rva_end":  "0x2D6000",
+                                                                          "executable":  false,
+                                                                          "writable":  false,
+                                                                          "kind":  "data",
+                                                                          "characteristics":  "0x48000040",
+                                                                          "characteristics_flags":  [
+                                                                                                        "IMAGE_SCN_CNT_INITIALIZED_DATA",
+                                                                                                        "IMAGE_SCN_MEM_NOT_PAGED",
+                                                                                                        "IMAGE_SCN_MEM_READ"
+                                                                                                    ]
+                                                                      },
+                                                          "confidence":  "UNKNOWN",
+                                                          "import_target":  null,
+                                                          "method":  "offline_import_analysis",
+                                                          "evidence":  {
+                                                                           "decision":  "REJECTED",
+                                                                           "reason":  "The three IAT entries are imported helpers, but none is a pool/free routine; therefore no validated hook slot is identified.",
+                                                                           "export":  "NtUserSetSysColors",
+                                                                           "export_rva":  "0x1E0420",
+                                                                           "import_targets":  [
+                                                                                                  {
+                                                                                                      "target_rva":  "0x2CF180",
+                                                                                                      "module":  "WIN32K.SYS",
+                                                                                                      "function":  "W32GetUserSessionState",
+                                                                                                      "import_target":  "WIN32K.SYS!W32GetUserSessionState",
+                                                                                                      "role":  "session-state lookup/acquisition",
+                                                                                                      "candidate_for_hook":  false,
+                                                                                                      "reason":  "not a pool/free routine",
+                                                                                                      "instruction_rva":  "0x1E0458",
+                                                                                                      "bytes":  "48 ff 15 21 ed 0e 00",
+                                                                                                      "disassembly":  "call qword ptr [rip + 0xEED21]"
+                                                                                                  },
+                                                                                                  {
+                                                                                                      "target_rva":  "0x2CF770",
+                                                                                                      "module":  "ntoskrnl.exe",
+                                                                                                      "function":  "PsGetCurrentProcessWow64Process",
+                                                                                                      "import_target":  "ntoskrnl.exe!PsGetCurrentProcessWow64Process",
+                                                                                                      "role":  "current-process WOW64 state query",
+                                                                                                      "candidate_for_hook":  false,
+                                                                                                      "reason":  "not a pool/free routine",
+                                                                                                      "instruction_rva":  "0x1E051C",
+                                                                                                      "bytes":  "48 ff 15 4d f2 0e 00",
+                                                                                                      "disassembly":  "call qword ptr [rip + 0xEF24D]"
+                                                                                                  },
+                                                                                                  {
+                                                                                                      "target_rva":  "0x2CF320",
+                                                                                                      "module":  "ntoskrnl.exe",
+                                                                                                      "function":  "ExRaiseDatatypeMisalignment",
+                                                                                                      "import_target":  "ntoskrnl.exe!ExRaiseDatatypeMisalignment",
+                                                                                                      "role":  "exception/error path",
+                                                                                                      "candidate_for_hook":  false,
+                                                                                                      "reason":  "not a pool/free routine",
+                                                                                                      "instruction_rva":  "0x1E0539",
+                                                                                                      "bytes":  "48 ff 15 e0 ed 0e 00",
+                                                                                                      "disassembly":  "call qword ptr [rip + 0xEEDE0]"
+                                                                                                  }
+                                                                                              ],
+                                                                           "register_arguments":  [
+                                                                                                      {
+                                                                                                          "instruction_rva":  "0x1E0458",
+                                                                                                          "before_call":  "r12d=ecx, r13d=r9d, r14=r8, r15=rdx; rcx/rdx/r8/r9 otherwise retain entry arguments",
+                                                                                                          "meaningful_arguments":  "entry ABI arguments; rdx (saved in r15) is later used as a color-array pointer"
+                                                                                                      },
+                                                                                                      {
+                                                                                                          "instruction_rva":  "0x1E051C",
+                                                                                                          "before_call":  "rbx=r12*4 after test r12d; no explicit argument setup immediately before call",
+                                                                                                          "meaningful_arguments":  "PsGetCurrentProcessWow64Process is a process-context query; caller registers are not its semantic inputs"
+                                                                                                      },
+                                                                                                      {
+                                                                                                          "instruction_rva":  "0x1E0539",
+                                                                                                          "before_call":  "rcx=(RAX!=0)?1:0 from the preceding call; call is gated by test rcx,r15",
+                                                                                                          "meaningful_arguments":  "error/validation path; r15 is the saved entry rdx pointer"
+                                                                                                      }
+                                                                                                  ],
+                                                                           "color_array_access":  [
+                                                                                                      "0x1E050B: lea rbx, [r12*4] (byte span = count * 4)",
+                                                                                                      "0x1E056F: lea rcx, [r15+rbx] (end of array saved from entry rdx)",
+                                                                                                      "0x1E05B3: lea rcx, [r14+rbx] (end of second array saved from entry r8)",
+                                                                                                      "0x1E05FD: mov rdx, r15 and 0x1E0636: mov rdx, r14 pass the two arrays to subsequent helpers"
+                                                                                                  ],
+                                                                           "call_sites":  [
+                                                                                              "0x1E0458, 0x1E051C and 0x1E0539 are direct RIP-indirect IAT calls; no call targets a FreePool-like import"
+                                                                                          ]
+                                                                       },
+                                                          "validation":  {
+                                                                             "valid":  false,
+                                                                             "reason":  "No pool/free import among the three requested IAT targets; .idata is read-only and the hook slot remains unresolved"
+                                                                         }
+                                                      }
+               }
+}
+
+
+
+
+
+
