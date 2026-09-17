@@ -15,6 +15,53 @@ NTSYSAPI PVOID NTAPI RtlPcToFileHeader(PVOID pc_value, PVOID* base_of_image);
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, \
         "[PubgExtMap][%s] " format "\n", stage, __VA_ARGS__)
 
+/*
+ * Diagnostic failure ABI.  0xE80Axxxx is always a failing NTSTATUS; the low
+ * 16 bits identify the load stage and the original status is printed before
+ * returning it.  STATUS_NOT_SUPPORTED and STATUS_REVISION_MISMATCH remain
+ * public gate results.  Payload stages 0x31..0x35 are duplicated in the
+ * payload source because payload_api.h is intentionally a stable ABI header.
+ */
+#define PUBGEXT_STAGE_STATUS_BASE ((NTSTATUS)0xE80A0000L)
+typedef enum _PUBGEXT_MAP_STAGE {
+    PUBGEXT_STAGE_KERNEL_RESOLVE = 0x01,
+    PUBGEXT_STAGE_KERNEL_IDENTITY = 0x02,
+    PUBGEXT_STAGE_HVCI = 0x03,
+    PUBGEXT_STAGE_PROFILE = 0x04,
+    PUBGEXT_STAGE_PROFILE_RVAS = 0x05,
+    PUBGEXT_STAGE_PAYLOAD_HEADER = 0x06,
+    PUBGEXT_STAGE_PAYLOAD_LAYOUT = 0x07,
+    PUBGEXT_STAGE_ROUTINE_RESOLVE = 0x08,
+    PUBGEXT_STAGE_ALLOCATE = 0x09,
+    PUBGEXT_STAGE_FABRICATE = 0x0A,
+    PUBGEXT_STAGE_PROTECT = 0x0B,
+    PUBGEXT_STAGE_COPY = 0x0C,
+    PUBGEXT_STAGE_RELOCATIONS = 0x0D,
+    PUBGEXT_STAGE_IMPORTS = 0x0E,
+    PUBGEXT_STAGE_PAYLOAD_ENTRY = 0x0F,
+    PUBGEXT_STAGE_PAYLOAD_RESULT = 0x10,
+    PUBGEXT_STAGE_PAYLOAD_VALIDATE = 0x31,
+    PUBGEXT_STAGE_DEVICE_CREATE = 0x32,
+    PUBGEXT_STAGE_DEVICE_OUTPUT = 0x33,
+    PUBGEXT_STAGE_SYMBOLIC_LINK = 0x34,
+    PUBGEXT_STAGE_DISPATCH_SETUP = 0x35
+} PUBGEXT_MAP_STAGE;
+
+static NTSTATUS StageFailure(PUBGEXT_MAP_STAGE stage, NTSTATUS original)
+{
+    PUBGEXT_MAP_PRINT("failure", "stage=0x%02X code=0x%08X original=0x%08X",
+        stage, (ULONG)(PUBGEXT_STAGE_STATUS_BASE | (ULONG)stage), original);
+    if (original == STATUS_NOT_SUPPORTED || original == STATUS_REVISION_MISMATCH)
+        return original;
+    return (NTSTATUS)(PUBGEXT_STAGE_STATUS_BASE | (ULONG)stage);
+}
+
+static BOOLEAN IsStageStatus(NTSTATUS status)
+{
+    return ((ULONG)status & 0xFFFF0000u) ==
+        ((ULONG)PUBGEXT_STAGE_STATUS_BASE & 0xFFFF0000u);
+}
+
 typedef PVOID(__fastcall* MmAllocateIndependentPages_t)(SIZE_T, ULONG);
 typedef VOID(__fastcall* MmFreeIndependentPages_t)(PVOID, SIZE_T);
 typedef BOOLEAN(__fastcall* MmSetPageProtection_t)(PVOID, SIZE_T, ULONG);
@@ -96,8 +143,11 @@ static NTSTATUS QueryCodeIntegrity(ULONG* options)
     if (!query)
         return STATUS_PROCEDURE_NOT_FOUND;
     info.Length = sizeof(info);
-    if (!NT_SUCCESS(query(103, &info, sizeof(info), NULL)))
-        return STATUS_NOT_SUPPORTED;
+    {
+        NTSTATUS status = query(103, &info, sizeof(info), NULL);
+        if (!NT_SUCCESS(status))
+            return status;
+    }
     *options = info.CodeIntegrityOptions;
     return STATUS_SUCCESS;
 }
@@ -610,14 +660,15 @@ static NTSTATUS ManualMap(PDRIVER_OBJECT driver_object)
     {
         PUBGEXT_MAP_PRINT("kernel-image", "fail RtlPcToFileHeader status=0x%08X",
             STATUS_NOT_FOUND);
-        return STATUS_NOT_FOUND;
+        return StageFailure(PUBGEXT_STAGE_KERNEL_RESOLVE, STATUS_NOT_FOUND);
     }
     kernel_nt = RtlImageNtHeader(kernel_base);
     if (!kernel_nt)
     {
         PUBGEXT_MAP_PRINT("kernel-image", "fail RtlImageNtHeader status=0x%08X",
             STATUS_INVALID_IMAGE_FORMAT);
-        return STATUS_INVALID_IMAGE_FORMAT;
+        return StageFailure(PUBGEXT_STAGE_KERNEL_RESOLVE,
+            STATUS_INVALID_IMAGE_FORMAT);
     }
     PUBGEXT_MAP_PRINT("kernel-image", "ok base=%p", kernel_base);
 
@@ -626,7 +677,7 @@ static NTSTATUS ManualMap(PDRIVER_OBJECT driver_object)
     if (!NT_SUCCESS(status))
     {
         PUBGEXT_MAP_PRINT("identity", "fail status=0x%08X", status);
-        return status;
+        return StageFailure(PUBGEXT_STAGE_KERNEL_IDENTITY, status);
     }
 
     /* Fail closed when kernel-mode HVCI is active. */
@@ -635,7 +686,7 @@ static NTSTATUS ManualMap(PDRIVER_OBJECT driver_object)
     if (!NT_SUCCESS(status))
     {
         PUBGEXT_MAP_PRINT("hvci-ci", "fail status=0x%08X", status);
-        return status;
+        return StageFailure(PUBGEXT_STAGE_HVCI, status);
     }
     PUBGEXT_MAP_PRINT("hvci-ci", "ok%s", "");
 
@@ -644,7 +695,7 @@ static NTSTATUS ManualMap(PDRIVER_OBJECT driver_object)
     {
         PUBGEXT_MAP_PRINT("profile", "fail missing profile identity status=0x%08X",
             STATUS_NOT_SUPPORTED);
-        return STATUS_NOT_SUPPORTED;
+        return StageFailure(PUBGEXT_STAGE_PROFILE, STATUS_NOT_SUPPORTED);
     }
     PUBGEXT_MAP_PRINT("profile", "ok id=%s file_size=%lu", generated_profile.profile_id,
         generated_profile.ntoskrnl.file_size);
@@ -655,7 +706,7 @@ static NTSTATUS ManualMap(PDRIVER_OBJECT driver_object)
     if (!NT_SUCCESS(status))
     {
         PUBGEXT_MAP_PRINT("rvas", "fail status=0x%08X", status);
-        return status;
+        return StageFailure(PUBGEXT_STAGE_PROFILE_RVAS, status);
     }
     PUBGEXT_MAP_PRINT("rvas", "ok allocate=0x%08X protect=0x%08X free=0x%08X",
         generated_profile.mm_allocate_independent_pages_rva,
@@ -667,7 +718,8 @@ static NTSTATUS ManualMap(PDRIVER_OBJECT driver_object)
     {
         PUBGEXT_MAP_PRINT("payload-header", "fail DOS header status=0x%08X",
             STATUS_INVALID_IMAGE_FORMAT);
-        return STATUS_INVALID_IMAGE_FORMAT;
+        return StageFailure(PUBGEXT_STAGE_PAYLOAD_HEADER,
+            STATUS_INVALID_IMAGE_FORMAT);
     }
     payload_nt = (PIMAGE_NT_HEADERS)((PUCHAR)&hexData + dos->e_lfanew);
     if (payload_nt->Signature != IMAGE_NT_SIGNATURE ||
@@ -675,7 +727,8 @@ static NTSTATUS ManualMap(PDRIVER_OBJECT driver_object)
     {
         PUBGEXT_MAP_PRINT("payload-header", "fail NT header status=0x%08X",
             STATUS_INVALID_IMAGE_FORMAT);
-        return STATUS_INVALID_IMAGE_FORMAT;
+        return StageFailure(PUBGEXT_STAGE_PAYLOAD_HEADER,
+            STATUS_INVALID_IMAGE_FORMAT);
     }
     PUBGEXT_MAP_PRINT("payload-header", "ok image_size=0x%08X entry=0x%08X",
         payload_nt->OptionalHeader.SizeOfImage,
@@ -684,20 +737,22 @@ static NTSTATUS ManualMap(PDRIVER_OBJECT driver_object)
     if (!NT_SUCCESS(status))
     {
         PUBGEXT_MAP_PRINT("payload-layout", "fail status=0x%08X", status);
-        return status;
+        return StageFailure(PUBGEXT_STAGE_PAYLOAD_LAYOUT, status);
     }
     if (!RvaRangeValid(payload_nt, payload_nt->OptionalHeader.AddressOfEntryPoint,
         sizeof(UCHAR)))
     {
         PUBGEXT_MAP_PRINT("payload-layout", "fail entry RVA status=0x%08X",
             STATUS_INVALID_IMAGE_FORMAT);
-        return STATUS_INVALID_IMAGE_FORMAT;
+        return StageFailure(PUBGEXT_STAGE_PAYLOAD_LAYOUT,
+            STATUS_INVALID_IMAGE_FORMAT);
     }
     if (!RvaIsExecutable(payload_nt, payload_nt->OptionalHeader.AddressOfEntryPoint))
     {
         PUBGEXT_MAP_PRINT("payload-layout", "fail entry RVA is not executable status=0x%08X",
             STATUS_INVALID_IMAGE_FORMAT);
-        return STATUS_INVALID_IMAGE_FORMAT;
+        return StageFailure(PUBGEXT_STAGE_PAYLOAD_LAYOUT,
+            STATUS_INVALID_IMAGE_FORMAT);
     }
     PUBGEXT_MAP_PRINT("payload-layout", "ok%s", "");
 
@@ -708,7 +763,8 @@ static NTSTATUS ManualMap(PDRIVER_OBJECT driver_object)
     {
         PUBGEXT_MAP_PRINT("rvas", "fail resolved routine pointer status=0x%08X",
             STATUS_PROCEDURE_NOT_FOUND);
-        return STATUS_PROCEDURE_NOT_FOUND;
+        return StageFailure(PUBGEXT_STAGE_ROUTINE_RESOLVE,
+            STATUS_PROCEDURE_NOT_FOUND);
     }
 
     /* Map only after all preflight checks have passed. */
@@ -719,7 +775,8 @@ static NTSTATUS ManualMap(PDRIVER_OBJECT driver_object)
     {
         PUBGEXT_MAP_PRINT("allocation", "fail status=0x%08X",
             STATUS_INSUFFICIENT_RESOURCES);
-        return STATUS_INSUFFICIENT_RESOURCES;
+        return StageFailure(PUBGEXT_STAGE_ALLOCATE,
+            STATUS_INSUFFICIENT_RESOURCES);
     }
     PUBGEXT_MAP_PRINT("allocation", "ok base=%p", g_allocated_memory);
 
@@ -732,6 +789,7 @@ static NTSTATUS ManualMap(PDRIVER_OBJECT driver_object)
             PUBGEXT_MAP_PRINT("driver-object",
                 "fail fabricate status=0x%08X tag=0x%08X", status,
                 PUBGEXT_FABRICATED_DRIVER_TAG);
+            status = StageFailure(PUBGEXT_STAGE_FABRICATE, status);
             goto map_failure;
         }
         PUBGEXT_MAP_PRINT("driver-object",
@@ -751,6 +809,7 @@ static NTSTATUS ManualMap(PDRIVER_OBJECT driver_object)
     {
         status = STATUS_UNSUCCESSFUL;
         PUBGEXT_MAP_PRINT("protection", "fail status=0x%08X", status);
+        status = StageFailure(PUBGEXT_STAGE_PROTECT, status);
         goto map_failure;
     }
     PUBGEXT_MAP_PRINT("protection", "ok%s", "");
@@ -760,6 +819,7 @@ static NTSTATUS ManualMap(PDRIVER_OBJECT driver_object)
     if (!NT_SUCCESS(status))
     {
         PUBGEXT_MAP_PRINT("copy", "fail status=0x%08X", status);
+        status = StageFailure(PUBGEXT_STAGE_COPY, status);
         goto map_failure;
     }
     PUBGEXT_MAP_PRINT("copy", "ok%s", "");
@@ -768,6 +828,7 @@ static NTSTATUS ManualMap(PDRIVER_OBJECT driver_object)
     if (!NT_SUCCESS(status))
     {
         PUBGEXT_MAP_PRINT("relocations", "fail status=0x%08X", status);
+        status = StageFailure(PUBGEXT_STAGE_RELOCATIONS, status);
         goto map_failure;
     }
     PUBGEXT_MAP_PRINT("relocations", "ok%s", "");
@@ -776,6 +837,7 @@ static NTSTATUS ManualMap(PDRIVER_OBJECT driver_object)
     if (!NT_SUCCESS(status))
     {
         PUBGEXT_MAP_PRINT("imports", "fail status=0x%08X", status);
+        status = StageFailure(PUBGEXT_STAGE_IMPORTS, status);
         goto map_failure;
     }
     PUBGEXT_MAP_PRINT("imports", "ok%s", "");
@@ -793,6 +855,9 @@ static NTSTATUS ManualMap(PDRIVER_OBJECT driver_object)
     {
         /* The payload creates the device atomically; failed init leaves none. */
         status = NT_SUCCESS(status) ? STATUS_UNSUCCESSFUL : status;
+        if (!IsStageStatus(status))
+            status = StageFailure(result.device_created ?
+                PUBGEXT_STAGE_PAYLOAD_ENTRY : PUBGEXT_STAGE_PAYLOAD_RESULT, status);
         PUBGEXT_MAP_PRINT("payload-init", "fail status=0x%08X", status);
         PUBGEXT_MAP_PRINT("device", "fail payload_status=0x%08X created=%lu",
             (NTSTATUS)result.status, result.device_created);

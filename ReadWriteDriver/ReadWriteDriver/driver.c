@@ -7,6 +7,25 @@
 #define PUBGEXT_DEVICE_NAME L"\\Device\\PubgExtRw"
 #define PUBGEXT_DOS_NAME L"\\DosDevices\\PubgExtRw"
 
+/* Must match the payload-stage entries documented in the mapper. */
+#define PUBGEXT_STAGE_STATUS_BASE ((NTSTATUS)0xE80A0000L)
+typedef enum _PUBGEXT_PAYLOAD_STAGE {
+    PUBGEXT_STAGE_PAYLOAD_VALIDATE = 0x31,
+    PUBGEXT_STAGE_DEVICE_CREATE = 0x32,
+    PUBGEXT_STAGE_DEVICE_OUTPUT = 0x33,
+    PUBGEXT_STAGE_SYMBOLIC_LINK = 0x34,
+    PUBGEXT_STAGE_DISPATCH_SETUP = 0x35
+} PUBGEXT_PAYLOAD_STAGE;
+
+static NTSTATUS PayloadStageFailure(PUBGEXT_PAYLOAD_STAGE stage,
+    NTSTATUS original)
+{
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
+        "[PubgExtPayload][failure] stage=0x%02X code=0x%08X original=0x%08X\n",
+        stage, (ULONG)(PUBGEXT_STAGE_STATUS_BASE | (ULONG)stage), original);
+    return (NTSTATUS)(PUBGEXT_STAGE_STATUS_BASE | (ULONG)stage);
+}
+
 /* This kernel export is not declared by every WDK ntifs.h version. */
 NTSYSAPI PVOID NTAPI PsGetProcessWow64Process(_In_ PEPROCESS Process);
 
@@ -517,6 +536,7 @@ NTSTATUS PayloadInitialize(const PUBGEXT_PAYLOAD_INIT* init,
         driver_object->DriverExtension->DriverObject != driver_object)
     {
         status = STATUS_INVALID_PARAMETER;
+        status = PayloadStageFailure(PUBGEXT_STAGE_PAYLOAD_VALIDATE, status);
         goto done;
     }
 
@@ -524,6 +544,7 @@ NTSTATUS PayloadInitialize(const PUBGEXT_PAYLOAD_INIT* init,
     if (g_device_object)
     {
         status = STATUS_DEVICE_BUSY;
+        status = PayloadStageFailure(PUBGEXT_STAGE_DEVICE_CREATE, status);
         goto done;
     }
     g_device_object = NULL;
@@ -531,10 +552,14 @@ NTSTATUS PayloadInitialize(const PUBGEXT_PAYLOAD_INIT* init,
         (DEVICE_TYPE)PUBGEXT_IOCTL_DEVICE_TYPE, FILE_DEVICE_SECURE_OPEN, FALSE,
         &sddl, &g_device_class_guid, &g_device_object);
     if (!NT_SUCCESS(status))
+    {
+        status = PayloadStageFailure(PUBGEXT_STAGE_DEVICE_CREATE, status);
         goto done;
+    }
     if (!g_device_object)
     {
         status = STATUS_UNSUCCESSFUL;
+        status = PayloadStageFailure(PUBGEXT_STAGE_DEVICE_OUTPUT, status);
         goto done;
     }
     status = IoCreateSymbolicLink(&dos_name, &device_name);
@@ -542,6 +567,7 @@ NTSTATUS PayloadInitialize(const PUBGEXT_PAYLOAD_INIT* init,
     {
         IoDeleteDevice(g_device_object);
         g_device_object = NULL;
+        status = PayloadStageFailure(PUBGEXT_STAGE_SYMBOLIC_LINK, status);
         goto done;
     }
     driver_object->MajorFunction[IRP_MJ_CREATE] = DispatchCreate;
