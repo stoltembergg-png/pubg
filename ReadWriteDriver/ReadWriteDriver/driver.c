@@ -49,13 +49,13 @@ static NTSTATUS CompleteCreate(PIRP irp, NTSTATUS status)
 
 /*
  * Exact DOS image paths allowed to open the device on this machine. These
- * paths vary by machine and build directory; adding another executable
- * requires editing this single allowlist. There is deliberately no basename,
- * root, or suffix fallback.
+ * paths vary by machine and build directory; adding another executable (for
+ * example, in a new build folder) requires editing this single allowlist.
+ * There is deliberately no basename, root, or suffix fallback.
  */
 static const UNICODE_STRING g_allowed_image_paths[] = {
-    RTL_CONSTANT_STRING(L"\\??\\D:\\PROJETOS\\PUBG\\BUILD-FIX2\\RELEASE\\RUNTIMEBROKER.EXE"),
-    RTL_CONSTANT_STRING(L"\\??\\D:\\PROJETOS\\PUBG\\READWRITEDRIVER\\X64\\RELEASE\\READWRITEUSER.EXE")
+    RTL_CONSTANT_STRING(L"\\??\\D:\\PROJETOS\\PUBG\\READWRITEDRIVER\\READWRITEUSER\\X64\\RELEASE\\READWRITEUSER.EXE"),
+    RTL_CONSTANT_STRING(L"\\??\\D:\\PROJETOS\\PUBG\\BUILD\\RELEASE\\RUNTIMEBROKER.EXE")
 };
 
 static BOOLEAN EqualCanonicalImagePath(PUNICODE_STRING image_name)
