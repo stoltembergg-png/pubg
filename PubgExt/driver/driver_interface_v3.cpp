@@ -62,8 +62,8 @@ namespace
 
     size_t TransferChunkSize(uint32_t maxTransfer)
     {
-        return static_cast<size_t>(std::min<uint32_t>(
-            PUBGEXT_COPY_CHUNK, std::min<uint32_t>(maxTransfer, PUBGEXT_MAX_TRANSFER)));
+        return static_cast<size_t>((std::min<uint32_t>)(
+            PUBGEXT_COPY_CHUNK, (std::min<uint32_t>)(maxTransfer, PUBGEXT_MAX_TRANSFER)));
     }
 }
 
@@ -121,7 +121,7 @@ bool DriverInterfaceV3::Initialize()
         Cleanup();
         return false;
     }
-    maxTransfer_ = std::min<uint32_t>(queryResponse.max_transfer, PUBGEXT_MAX_TRANSFER);
+    maxTransfer_ = (std::min<uint32_t>)(queryResponse.max_transfer, PUBGEXT_MAX_TRANSFER);
 
     // AUTH is a header-only request. The driver validates the exact 32-byte
     // request and returns its 40-byte response in the output buffer.
@@ -252,8 +252,8 @@ bool DriverInterfaceV3::ReadMemory(DWORD pid, uintptr_t address, void* buffer,
     size_t totalTransferred = 0;
     while (totalTransferred < size)
     {
-        const size_t chunk = std::min(chunkLimit, size - totalTransferred);
-        if (totalTransferred > std::numeric_limits<uintptr_t>::max() - address)
+        const size_t chunk = (std::min)(chunkLimit, size - totalTransferred);
+        if (totalTransferred > (std::numeric_limits<uintptr_t>::max)() - address)
             break;
 
         PUBGEXT_READ_REQUEST request = {};
@@ -340,8 +340,8 @@ bool DriverInterfaceV3::WriteMemory(DWORD pid, uintptr_t address, const void* bu
     size_t totalTransferred = 0;
     while (totalTransferred < size)
     {
-        const size_t chunk = std::min(chunkLimit, size - totalTransferred);
-        if (totalTransferred > std::numeric_limits<uintptr_t>::max() - address)
+        const size_t chunk = (std::min)(chunkLimit, size - totalTransferred);
+        if (totalTransferred > (std::numeric_limits<uintptr_t>::max)() - address)
             break;
 
         std::vector<BYTE> input(PUBGEXT_WRITE_FIXED_SIZE + chunk);

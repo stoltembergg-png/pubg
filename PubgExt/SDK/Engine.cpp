@@ -637,7 +637,7 @@ void Engine::UpdateGrenades() {
 	}
 
 	for (size_t i = 0; i < batch1.size(); i += MAX_BATCH_ENTRIES) {
-		size_t chunk = std::min((size_t)MAX_BATCH_ENTRIES, batch1.size() - i);
+		size_t chunk = (std::min)((size_t)MAX_BATCH_ENTRIES, batch1.size() - i);
 		TargetProcess.BatchRead(&batch1[i], chunk);
 	}
 
@@ -651,7 +651,7 @@ void Engine::UpdateGrenades() {
 	}
 
 	for (size_t i = 0; i < batch2.size(); i += MAX_BATCH_ENTRIES) {
-		size_t chunk = std::min((size_t)MAX_BATCH_ENTRIES, batch2.size() - i);
+		size_t chunk = (std::min)((size_t)MAX_BATCH_ENTRIES, batch2.size() - i);
 		TargetProcess.BatchRead(&batch2[i], chunk);
 	}
 
@@ -743,7 +743,7 @@ void Engine::UpdatePlayers()
 	}
 
 	for (size_t i = 0; i < batch1.size(); i += MAX_BATCH_ENTRIES) {
-		size_t chunk = std::min((size_t)MAX_BATCH_ENTRIES, batch1.size() - i);
+		size_t chunk = (std::min)((size_t)MAX_BATCH_ENTRIES, batch1.size() - i);
 		TargetProcess.BatchRead(&batch1[i], chunk);
 	}
 	Local.Recoil = localRecoil;
@@ -783,7 +783,7 @@ std::vector<DriverInterfaceV3::BatchReadEntry> batch2;
 	}
 
 	for (size_t i = 0; i < batch2.size(); i += MAX_BATCH_ENTRIES) {
-		size_t chunk = std::min((size_t)MAX_BATCH_ENTRIES, batch2.size() - i);
+		size_t chunk = (std::min)((size_t)MAX_BATCH_ENTRIES, batch2.size() - i);
 		TargetProcess.BatchRead(&batch2[i], chunk);
 	}
 	std::vector<DriverInterfaceV3::BatchReadEntry> batch3;
@@ -828,7 +828,7 @@ std::vector<DriverInterfaceV3::BatchReadEntry> batch2;
 	}
 
 	for (size_t i = 0; i < batch3.size(); i += MAX_BATCH_ENTRIES) {
-		size_t chunk = std::min((size_t)MAX_BATCH_ENTRIES, batch3.size() - i);
+		size_t chunk = (std::min)((size_t)MAX_BATCH_ENTRIES, batch3.size() - i);
 		TargetProcess.BatchRead(&batch3[i], chunk);
 	}
 
