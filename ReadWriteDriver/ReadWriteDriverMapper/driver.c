@@ -28,30 +28,42 @@ static PVOID g_allocated_memory;
 static SIZE_T g_allocated_size;
 static PDRIVER_OBJECT g_fabricated_driver_object;
 
+typedef struct _PUBGEXT_FABRICATED_DRIVER_STORAGE {
+    DRIVER_OBJECT driver_object;
+    DRIVER_EXTENSION driver_extension;
+} PUBGEXT_FABRICATED_DRIVER_STORAGE;
+
+static PUBGEXT_FABRICATED_DRIVER_STORAGE* g_fabricated_driver_storage;
+
 static NTSTATUS FabricateDriverObject(PVOID image, SIZE_T image_size,
     PDRIVER_OBJECT* driver_object)
 {
+    PUBGEXT_FABRICATED_DRIVER_STORAGE* storage;
     PDRIVER_OBJECT fabricated;
 
     if (!image || !driver_object || image_size == 0 || image_size > MAXULONG)
         return STATUS_INVALID_PARAMETER;
 
-    fabricated = (PDRIVER_OBJECT)ExAllocatePool2(POOL_FLAG_NON_PAGED,
-        sizeof(*fabricated), PUBGEXT_FABRICATED_DRIVER_TAG);
-    if (!fabricated)
+    storage = (PUBGEXT_FABRICATED_DRIVER_STORAGE*)ExAllocatePool2(
+        POOL_FLAG_NON_PAGED, sizeof(*storage), PUBGEXT_FABRICATED_DRIVER_TAG);
+    if (!storage)
         return STATUS_INSUFFICIENT_RESOURCES;
 
-    RtlZeroMemory(fabricated, sizeof(*fabricated));
+    RtlZeroMemory(storage, sizeof(*storage));
+    fabricated = &storage->driver_object;
     fabricated->Type = IO_TYPE_DRIVER;
     fabricated->Size = (CSHORT)sizeof(*fabricated);
     fabricated->DriverUnload = NULL;
     fabricated->DriverStart = image;
     fabricated->DriverSize = (ULONG)image_size;
     fabricated->DriverSection = NULL;
+    fabricated->DriverExtension = &storage->driver_extension;
     fabricated->DeviceObject = NULL;
+    storage->driver_extension.DriverObject = fabricated;
     /* DriverName remains an empty UNICODE_STRING from the zeroed object. */
 
     g_fabricated_driver_object = fabricated;
+    g_fabricated_driver_storage = storage;
     *driver_object = fabricated;
     return STATUS_SUCCESS;
 }
@@ -60,7 +72,8 @@ static VOID ReleaseFabricatedDriverObject(VOID)
 {
     if (g_fabricated_driver_object)
     {
-        ExFreePool(g_fabricated_driver_object);
+        ExFreePool(g_fabricated_driver_storage);
+        g_fabricated_driver_storage = NULL;
         g_fabricated_driver_object = NULL;
     }
 }
@@ -142,14 +155,19 @@ typedef struct _RSDS_LOCAL {
 
 static BOOLEAN GetLoadedPdbIdentity(PVOID image, GUID* guid, ULONG* age)
 {
-    PIMAGE_NT_HEADERS nt = RtlImageNtHeader(image);
+    PIMAGE_NT_HEADERS nt;
     ULONG directory_size = 0;
-    PIMAGE_DEBUG_DIRECTORY debug = (PIMAGE_DEBUG_DIRECTORY)
-        RtlImageDirectoryEntryToData(image, TRUE, IMAGE_DIRECTORY_ENTRY_DEBUG, &directory_size);
+    PIMAGE_DEBUG_DIRECTORY debug;
     ULONG count;
     ULONG i;
-    if (!nt || nt->Signature != IMAGE_NT_SIGNATURE || !guid || !age ||
-        !debug || directory_size < sizeof(*debug))
+    if (!image || !guid || !age)
+        return FALSE;
+    nt = RtlImageNtHeader(image);
+    if (!nt || nt->Signature != IMAGE_NT_SIGNATURE)
+        return FALSE;
+    debug = (PIMAGE_DEBUG_DIRECTORY)RtlImageDirectoryEntryToData(
+        image, TRUE, IMAGE_DIRECTORY_ENTRY_DEBUG, &directory_size);
+    if (!debug || directory_size < sizeof(*debug))
         return FALSE;
     if ((ULONG_PTR)debug < (ULONG_PTR)image ||
         (ULONG_PTR)debug - (ULONG_PTR)image > nt->OptionalHeader.SizeOfImage ||
@@ -275,8 +293,11 @@ static NTSTATUS ValidateLoadedKernelIdentity(PVOID image, const ModuleIdentity* 
 
 static BOOLEAN RvaIsExecutable(PIMAGE_NT_HEADERS nt, ULONG rva)
 {
-    PIMAGE_SECTION_HEADER section = IMAGE_FIRST_SECTION(nt);
+    PIMAGE_SECTION_HEADER section;
     USHORT i;
+    if (!nt)
+        return FALSE;
+    section = IMAGE_FIRST_SECTION(nt);
     for (i = 0; i < nt->FileHeader.NumberOfSections; ++i)
     {
         ULONG size = section[i].Misc.VirtualSize > section[i].SizeOfRawData ?
@@ -291,6 +312,8 @@ static BOOLEAN RvaIsExecutable(PIMAGE_NT_HEADERS nt, ULONG rva)
 
 static NTSTATUS ValidateProfileRvas(PIMAGE_NT_HEADERS nt)
 {
+    if (!nt)
+        return STATUS_INVALID_IMAGE_FORMAT;
     if (!generated_profile.has_mm_allocate_independent_pages_rva ||
         !generated_profile.has_mm_set_page_protection_rva ||
         !generated_profile.has_mm_free_independent_pages_rva)
@@ -332,6 +355,8 @@ static VOID ReleaseMappedImage(VOID)
 
 static BOOLEAN RvaRangeValid(PIMAGE_NT_HEADERS nt, ULONG rva, ULONG size)
 {
+    if (!nt)
+        return FALSE;
     return rva <= nt->OptionalHeader.SizeOfImage &&
         size <= nt->OptionalHeader.SizeOfImage - rva;
 }
@@ -342,7 +367,7 @@ static NTSTATUS ValidateImageLayout(PVOID source, SIZE_T source_size,
     PIMAGE_SECTION_HEADER section;
     USHORT i;
 
-    if (!nt || nt->Signature != IMAGE_NT_SIGNATURE ||
+    if (!source || !nt || nt->Signature != IMAGE_NT_SIGNATURE ||
         nt->FileHeader.SizeOfOptionalHeader != sizeof(IMAGE_OPTIONAL_HEADER64) ||
         nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
         nt->OptionalHeader.SizeOfImage == 0 ||
@@ -379,12 +404,17 @@ static NTSTATUS ValidateImageLayout(PVOID source, SIZE_T source_size,
 static NTSTATUS CopyHeadersAndSections(PVOID source, SIZE_T source_size,
     PVOID destination, PIMAGE_NT_HEADERS nt)
 {
-    PIMAGE_SECTION_HEADER section = IMAGE_FIRST_SECTION(nt);
     NTSTATUS status = ValidateImageLayout(source, source_size, nt);
+    PIMAGE_SECTION_HEADER section;
     USHORT i;
 
-    if (!NT_SUCCESS(status))
+    if (!NT_SUCCESS(status) || !destination)
+    {
+        if (NT_SUCCESS(status))
+            status = STATUS_INVALID_PARAMETER;
         return status;
+    }
+    section = IMAGE_FIRST_SECTION(nt);
     RtlZeroMemory(destination, nt->OptionalHeader.SizeOfImage);
     RtlCopyMemory(destination, source, nt->OptionalHeader.SizeOfHeaders);
     for (i = 0; i < nt->FileHeader.NumberOfSections; ++i)
@@ -409,6 +439,8 @@ static NTSTATUS FixIat(PVOID destination, PIMAGE_NT_HEADERS nt)
     ULONG descriptor_count;
     ULONG descriptor_index;
 
+    if (!destination || !nt)
+        return STATUS_INVALID_PARAMETER;
     if (nt->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_IMPORT)
         return STATUS_SUCCESS;
     directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
@@ -457,6 +489,8 @@ static NTSTATUS FixIat(PVOID destination, PIMAGE_NT_HEADERS nt)
                 if (!RvaRangeValid(nt, thunk->u1.AddressOfData, sizeof(USHORT)))
                     return STATUS_INVALID_IMAGE_FORMAT;
                 while (chars + 1 < RTL_NUMBER_OF(buffer) &&
+                    thunk->u1.AddressOfData <= MAXULONG -
+                        FIELD_OFFSET(IMAGE_IMPORT_BY_NAME, Name) - (ULONG)chars &&
                     RvaRangeValid(nt, thunk->u1.AddressOfData +
                         FIELD_OFFSET(IMAGE_IMPORT_BY_NAME, Name) + (ULONG)chars,
                         sizeof(UCHAR)) && import->Name[chars])
@@ -464,7 +498,9 @@ static NTSTATUS FixIat(PVOID destination, PIMAGE_NT_HEADERS nt)
                     buffer[chars] = (WCHAR)import->Name[chars];
                     ++chars;
                 }
-                if (chars == 0 || !RvaRangeValid(nt, thunk->u1.AddressOfData +
+                if (chars == 0 || thunk->u1.AddressOfData > MAXULONG -
+                    FIELD_OFFSET(IMAGE_IMPORT_BY_NAME, Name) - (ULONG)chars ||
+                    !RvaRangeValid(nt, thunk->u1.AddressOfData +
                     FIELD_OFFSET(IMAGE_IMPORT_BY_NAME, Name) + (ULONG)chars,
                     sizeof(UCHAR)) || import->Name[chars])
                     return STATUS_BUFFER_OVERFLOW;
@@ -492,7 +528,10 @@ static NTSTATUS FixRelocations(PVOID destination, PIMAGE_NT_HEADERS nt)
     IMAGE_DATA_DIRECTORY directory;
     ULONG directory_size;
     PIMAGE_BASE_RELOCATION table;
-    ULONG_PTR delta = (ULONG_PTR)destination - nt->OptionalHeader.ImageBase;
+    ULONG_PTR delta;
+    if (!destination || !nt)
+        return STATUS_INVALID_PARAMETER;
+    delta = (ULONG_PTR)destination - nt->OptionalHeader.ImageBase;
     if (nt->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_BASERELOC)
         return STATUS_SUCCESS;
     directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
@@ -651,6 +690,12 @@ static NTSTATUS ManualMap(PDRIVER_OBJECT driver_object)
         sizeof(UCHAR)))
     {
         PUBGEXT_MAP_PRINT("payload-layout", "fail entry RVA status=0x%08X",
+            STATUS_INVALID_IMAGE_FORMAT);
+        return STATUS_INVALID_IMAGE_FORMAT;
+    }
+    if (!RvaIsExecutable(payload_nt, payload_nt->OptionalHeader.AddressOfEntryPoint))
+    {
+        PUBGEXT_MAP_PRINT("payload-layout", "fail entry RVA is not executable status=0x%08X",
             STATUS_INVALID_IMAGE_FORMAT);
         return STATUS_INVALID_IMAGE_FORMAT;
     }

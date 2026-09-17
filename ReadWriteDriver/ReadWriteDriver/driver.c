@@ -510,13 +510,33 @@ NTSTATUS PayloadInitialize(const PUBGEXT_PAYLOAD_INIT* init,
     result->abi_major = PUBGEXT_PAYLOAD_ABI_MAJOR;
     result->abi_minor = PUBGEXT_PAYLOAD_ABI_MINOR;
     driver_object = (PDRIVER_OBJECT)(ULONG_PTR)init->driver_object;
+    if (driver_object->Type != IO_TYPE_DRIVER ||
+        driver_object->Size < sizeof(*driver_object) ||
+        !driver_object->DriverStart || driver_object->DriverSize == 0 ||
+        !driver_object->DriverExtension ||
+        driver_object->DriverExtension->DriverObject != driver_object)
+    {
+        status = STATUS_INVALID_PARAMETER;
+        goto done;
+    }
 
     ExInitializePushLock(&g_session_lock);
+    if (g_device_object)
+    {
+        status = STATUS_DEVICE_BUSY;
+        goto done;
+    }
+    g_device_object = NULL;
     status = IoCreateDeviceSecure(driver_object, 0, &device_name,
         (DEVICE_TYPE)PUBGEXT_IOCTL_DEVICE_TYPE, FILE_DEVICE_SECURE_OPEN, FALSE,
         &sddl, &g_device_class_guid, &g_device_object);
     if (!NT_SUCCESS(status))
         goto done;
+    if (!g_device_object)
+    {
+        status = STATUS_UNSUCCESSFUL;
+        goto done;
+    }
     status = IoCreateSymbolicLink(&dos_name, &device_name);
     if (!NT_SUCCESS(status))
     {
