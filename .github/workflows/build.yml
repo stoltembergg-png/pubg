@@ -74,15 +74,30 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $driverRoot = Join-Path $PWD 'ReadWriteDriver'
+          $pubgExtDriverRoot = Join-Path $PWD 'PubgExt\driver'
           if (-not (Test-Path -LiteralPath $driverRoot)) {
-            Write-Warning 'ReadWriteDriver source tree not present; skipping static checks.'
-            exit 0
+            throw 'ReadWriteDriver source tree is missing; cannot verify the new driver architecture.'
+          }
+          if (-not (Test-Path -LiteralPath $pubgExtDriverRoot)) {
+            throw 'PubgExt\driver source tree is missing; cannot verify the IOCTL contract.'
           }
 
-          $sourceFiles = @(Get-ChildItem -LiteralPath $driverRoot -Recurse -File -Include '*.c', '*.h')
+          $sourceFiles = @(Get-ChildItem -LiteralPath $driverRoot -Recurse -File -Include '*.c', '*.h', '*.cpp')
+          $pubgExtSourceFiles = @(Get-ChildItem -LiteralPath $pubgExtDriverRoot -Recurse -File -Include '*.c', '*.h', '*.cpp')
+          $allDriverCodeFiles = @($sourceFiles + $pubgExtSourceFiles)
           $sourceText = (($sourceFiles | ForEach-Object {
             Get-Content -LiteralPath $_.FullName -Raw
           }) -join "`n")
+
+          # The old win32kbase hook must not return. Restrict this scan to
+          # driver code extensions so documentation and changelogs cannot trip it.
+          $legacyHookPattern = '(?i)NtUserSetSysColors|Win32FreePoolOffset|Win32kOffsets|physmem|assembly\.asm'
+          $legacyHookMatches = @($allDriverCodeFiles | Select-String -Pattern $legacyHookPattern)
+          if ($legacyHookMatches.Count -ne 0) {
+            $firstLegacyMatch = $legacyHookMatches[0]
+            throw ("Legacy hook residue found in driver code: {0}:{1}: {2}" -f $firstLegacyMatch.Path, $firstLegacyMatch.LineNumber, $firstLegacyMatch.Line.Trim())
+          }
+          Write-Host ("No legacy hook residue found in {0} driver source file(s)." -f $allDriverCodeFiles.Count)
 
           # Kernel imports must go through the resolver used by the mapper.
           if ($sourceText -notmatch '\bMmGetSystemRoutineAddress\b') {
@@ -94,22 +109,23 @@ jobs:
           Write-Host 'Kernel import resolver found: MmGetSystemRoutineAddress.'
 
           $mapperSource = Join-Path $driverRoot 'ReadWriteDriverMapper\driver.c'
-          if (Test-Path -LiteralPath $mapperSource) {
-            $mapperText = Get-Content -LiteralPath $mapperSource -Raw
-            $importThunkWrites = @([regex]::Matches($mapperText, 'pAddrThunk->u1\.Function\s*=\s*\(UINT_PTR\)lpFunction'))
-            $resolverCalls = @([regex]::Matches($mapperText, 'lpFunction\s*=\s*MmGetSystemRoutineAddress\s*\('))
-            if ($importThunkWrites.Count -gt 0 -and $resolverCalls.Count -eq 0) {
-              throw 'Mapper writes import thunks without a resolvable kernel-import call.'
-            }
-            $importAssignments = @([regex]::Matches($mapperText, '(?m)^[ \t]*lpFunction[ \t]*=[ \t]*(?<value>\S[^;\r\n]*)'))
-            foreach ($assignment in $importAssignments) {
-              $value = $assignment.Groups['value'].Value.Trim()
-              if ($value -notmatch '^(?:NULL|MmGetSystemRoutineAddress)\b') {
-                throw ("Mapper contains an import assignment that bypasses MmGetSystemRoutineAddress: {0}" -f $value)
-              }
-            }
-            Write-Host ("Import thunk resolution path verified ({0} resolver call(s))." -f $resolverCalls.Count)
+          if (-not (Test-Path -LiteralPath $mapperSource)) {
+            throw 'ReadWriteDriverMapper\driver.c is missing; cannot verify generated-profile consumption.'
           }
+          $mapperText = Get-Content -LiteralPath $mapperSource -Raw
+          $importThunkWrites = @([regex]::Matches($mapperText, 'pAddrThunk->u1\.Function\s*=\s*\(UINT_PTR\)lpFunction'))
+          $resolverCalls = @([regex]::Matches($mapperText, 'lpFunction\s*=\s*MmGetSystemRoutineAddress\s*\('))
+          if ($importThunkWrites.Count -gt 0 -and $resolverCalls.Count -eq 0) {
+            throw 'Mapper writes import thunks without a resolvable kernel-import call.'
+          }
+          $importAssignments = @([regex]::Matches($mapperText, '(?m)^[ \t]*lpFunction[ \t]*=[ \t]*(?<value>\S[^;\r\n]*)'))
+          foreach ($assignment in $importAssignments) {
+            $value = $assignment.Groups['value'].Value.Trim()
+            if ($value -notmatch '^(?:NULL|MmGetSystemRoutineAddress)\b') {
+              throw ("Mapper contains an import assignment that bypasses MmGetSystemRoutineAddress: {0}" -f $value)
+            }
+          }
+          Write-Host ("Import thunk resolution path verified ({0} resolver call(s))." -f $resolverCalls.Count)
 
           # These legacy mapper addresses are intentionally diagnostic only:
           # report them without failing this static, non-loading job.
@@ -123,23 +139,73 @@ jobs:
 
           $driverSource = Join-Path $driverRoot 'ReadWriteDriver\driver.c'
           if (-not (Test-Path -LiteralPath $driverSource)) {
-            throw 'ReadWriteDriver\driver.c is missing; cannot verify the win32kbase offset table.'
+            throw 'ReadWriteDriver\driver.c is missing; cannot verify the new transport.'
           }
           $driverText = Get-Content -LiteralPath $driverSource -Raw
-          $offsetTable = [regex]::Match($driverText, '(?s)Win32kOffsets\s*\[\]\s*=\s*\{(?<entries>.*?)\};')
-          if (-not $offsetTable.Success) {
-            throw 'win32kbase offset table (Win32kOffsets) was not found.'
+          $transportMarkers = @(
+            'IoCreateDeviceSecure',
+            'FILE_DEVICE_SECURE_OPEN',
+            'IoCreateSymbolicLink',
+            'IoGetRequestorProcess',
+            'IoVolumeDeviceToDosName',
+            'RtlEqualUnicodeString'
+          )
+          foreach ($marker in $transportMarkers) {
+            if ($driverText -notmatch [regex]::Escape($marker)) {
+              throw ("New transport marker is missing from ReadWriteDriver\driver.c: {0}" -f $marker)
+            }
           }
-          if ($driverText -notmatch 'GetPIDByName\(\s*"win32kbase\.sys"\s*\)') {
-            throw 'ReadWriteDriver does not identify win32kbase.sys before applying its offset.'
+          if ($driverText -notmatch '(?m)\bDriverUnload\s*=\s*NULL\b') {
+            throw 'ReadWriteDriver\driver.c does not explicitly disable DriverUnload (NULL).'
           }
-          if ($offsetTable.Groups['entries'].Value -notmatch '\{\s*[^,]+,\s*0x[0-9A-Fa-f]+\s*\}') {
-            throw 'win32kbase offset table has no hexadecimal offset entry.'
+          if ($driverText -notmatch '\bSTATUS_INVALID_DEVICE_REQUEST\b') {
+            throw 'ReadWriteDriver\driver.c does not reject unknown IOCTLs with STATUS_INVALID_DEVICE_REQUEST.'
           }
-          if ($driverText -notmatch '\bWin32FreePoolOffset\b' -or $driverText -notmatch '\bGetWin32FreePoolOffset\b') {
-            throw 'win32kbase offset table is not connected to the offset lookup.'
+          Write-Host 'New device transport, exact allowlist authorization, fail-closed IOCTL handling, and no-unload policy found.'
+
+          $virtualCopySource = Join-Path $driverRoot 'ReadWriteDriver\virtual_copy.c'
+          if (-not (Test-Path -LiteralPath $virtualCopySource)) {
+            throw 'ReadWriteDriver\virtual_copy.c is missing; cannot verify virtual process copying.'
           }
-          Write-Host 'win32kbase offset table found and connected to GetWin32FreePoolOffset.'
+          $virtualCopyText = Get-Content -LiteralPath $virtualCopySource -Raw
+          foreach ($marker in @('KeStackAttachProcess', 'KeUnstackDetachProcess', '__finally')) {
+            if ($virtualCopyText -notmatch [regex]::Escape($marker)) {
+              throw ("Virtual copy marker is missing from ReadWriteDriver\virtual_copy.c: {0}" -f $marker)
+            }
+          }
+          Write-Host 'Virtual copy attach/detach and __finally cleanup path found.'
+
+          $protocolHeader = Join-Path $PWD 'PubgExt\driver\ioctl_protocol.h'
+          if (-not (Test-Path -LiteralPath $protocolHeader)) {
+            throw 'PubgExt\driver\ioctl_protocol.h is missing; cannot verify the IOCTL contract.'
+          }
+          $protocolText = Get-Content -LiteralPath $protocolHeader -Raw
+          if ($protocolText -notmatch 'METHOD_BUFFERED') {
+            throw 'ioctl_protocol.h does not define/use the buffered IOCTL method marker.'
+          }
+          if ($protocolText -notmatch '(?m)^\s*#\s*define\s+PUBGEXT_IOCTL_DEVICE_TYPE\s+0x8337(?:u)?\b') {
+            throw 'ioctl_protocol.h does not define DeviceType 0x8337.'
+          }
+          foreach ($ioctl in @('PUBGEXT_IOCTL_AUTH', 'PUBGEXT_IOCTL_QUERY_CAPS', 'PUBGEXT_IOCTL_READ', 'PUBGEXT_IOCTL_WRITE')) {
+            if ($protocolText -notmatch ('(?m)^\s*#\s*define\s+' + $ioctl + '\b')) {
+              throw ("ioctl_protocol.h is missing the required IOCTL definition: {0}" -f $ioctl)
+            }
+          }
+          $majorDefinitions = @(Get-ChildItem -Path $PWD -Recurse -File -Include '*.h', '*.hpp' |
+            Select-String -Pattern '(?m)^\s*#\s*define\s+PUBGEXT_PROTOCOL_MAJOR\b')
+          if ($majorDefinitions.Count -ne 1) {
+            throw ("PUBGEXT_PROTOCOL_MAJOR must be defined in exactly one header; found {0} definition(s)." -f $majorDefinitions.Count)
+          }
+          Write-Host ("IOCTL contract verified in ioctl_protocol.h; PUBGEXT_PROTOCOL_MAJOR has one global header definition ({0})." -f $majorDefinitions[0].Path)
+
+          $generatedProfile = Join-Path $PWD 'tools\profiles\generated\profiles_generated.h'
+          if (-not (Test-Path -LiteralPath $generatedProfile)) {
+            throw 'tools\profiles\generated\profiles_generated.h is missing.'
+          }
+          if ($mapperText -notmatch 'profiles_generated\.h') {
+            throw 'ReadWriteDriverMapper\driver.c does not consume profiles_generated.h.'
+          }
+          Write-Host 'Mapper consumes the generated profile header, and the generated profile is present.'
 
       - name: Verify embedded driver payload
         if: always()
