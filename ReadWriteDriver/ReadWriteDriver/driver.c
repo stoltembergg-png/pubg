@@ -497,13 +497,15 @@ NTSTATUS PayloadInitialize(const PUBGEXT_PAYLOAD_INIT* init,
     PDRIVER_OBJECT driver_object;
     NTSTATUS status;
 
-    if (result)
-        RtlZeroMemory(result, sizeof(*result));
-    if (!init || !result || init->struct_size != sizeof(*init) ||
-        init->abi_major != PUBGEXT_PAYLOAD_ABI_MAJOR ||
-        init->abi_minor != PUBGEXT_PAYLOAD_ABI_MINOR ||
-        init->driver_object == 0)
+    if (!init || !result)
         return STATUS_INVALID_PARAMETER;
+    if (init->struct_size != sizeof(*init) || init->driver_object == 0)
+        return STATUS_INVALID_PARAMETER;
+    if (init->abi_major != PUBGEXT_PAYLOAD_ABI_MAJOR ||
+        init->abi_minor != PUBGEXT_PAYLOAD_ABI_MINOR)
+        return STATUS_REVISION_MISMATCH;
+
+    RtlZeroMemory(result, sizeof(*result));
     result->struct_size = sizeof(*result);
     result->abi_major = PUBGEXT_PAYLOAD_ABI_MAJOR;
     result->abi_minor = PUBGEXT_PAYLOAD_ABI_MINOR;

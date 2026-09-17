@@ -9,16 +9,61 @@
 NTSYSAPI PIMAGE_NT_HEADERS NTAPI RtlImageNtHeader(PVOID image);
 NTSYSAPI PVOID NTAPI RtlImageDirectoryEntryToData(PVOID image,
     BOOLEAN mapped_as_image, USHORT directory, PULONG size);
+NTSYSAPI PVOID NTAPI RtlPcToFileHeader(PVOID pc_value, PVOID* base_of_image);
+
+#define PUBGEXT_MAP_PRINT(stage, format, ...) \
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, \
+        "[PubgExtMap][%s] " format "\n", stage, __VA_ARGS__)
 
 typedef PVOID(__fastcall* MmAllocateIndependentPages_t)(SIZE_T, ULONG);
 typedef VOID(__fastcall* MmFreeIndependentPages_t)(PVOID, SIZE_T);
 typedef BOOLEAN(__fastcall* MmSetPageProtection_t)(PVOID, SIZE_T, ULONG);
+
+#define PUBGEXT_FABRICATED_DRIVER_TAG 'dRwP'
 
 static MmAllocateIndependentPages_t g_allocate_pages;
 static MmSetPageProtection_t g_set_page_protection;
 static MmFreeIndependentPages_t g_free_pages;
 static PVOID g_allocated_memory;
 static SIZE_T g_allocated_size;
+static PDRIVER_OBJECT g_fabricated_driver_object;
+
+static NTSTATUS FabricateDriverObject(PVOID image, SIZE_T image_size,
+    PDRIVER_OBJECT* driver_object)
+{
+    PDRIVER_OBJECT fabricated;
+
+    if (!image || !driver_object || image_size == 0 || image_size > MAXULONG)
+        return STATUS_INVALID_PARAMETER;
+
+    fabricated = (PDRIVER_OBJECT)ExAllocatePool2(POOL_FLAG_NON_PAGED,
+        sizeof(*fabricated), PUBGEXT_FABRICATED_DRIVER_TAG);
+    if (!fabricated)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    RtlZeroMemory(fabricated, sizeof(*fabricated));
+    fabricated->Type = IO_TYPE_DRIVER;
+    fabricated->Size = (CSHORT)sizeof(*fabricated);
+    fabricated->DriverUnload = NULL;
+    fabricated->DriverStart = image;
+    fabricated->DriverSize = (ULONG)image_size;
+    fabricated->DriverSection = NULL;
+    fabricated->DeviceObject = NULL;
+    /* DriverName remains an empty UNICODE_STRING from the zeroed object. */
+
+    g_fabricated_driver_object = fabricated;
+    *driver_object = fabricated;
+    return STATUS_SUCCESS;
+}
+
+static VOID ReleaseFabricatedDriverObject(VOID)
+{
+    if (g_fabricated_driver_object)
+    {
+        ExFreePool(g_fabricated_driver_object);
+        g_fabricated_driver_object = NULL;
+    }
+}
 
 typedef struct _SYSTEM_CODEINTEGRITY_INFORMATION_LOCAL {
     ULONG Length;
@@ -50,8 +95,14 @@ static NTSTATUS ValidateHvcIAndCi(VOID)
     NTSTATUS status = QueryCodeIntegrity(&options);
     if (!NT_SUCCESS(status))
         return status;
+    PUBGEXT_MAP_PRINT("hvci-ci", "observed options=0x%08X", options);
     /* CODEINTEGRITY_OPTION_HVCI_KMCI_ENABLED. Audit-only is not execution. */
-    return (options & 0x00000400u) ? STATUS_NOT_SUPPORTED : STATUS_SUCCESS;
+    if (options & 0x00000400u)
+    {
+        PUBGEXT_MAP_PRINT("hvci-ci", "fail HVCI_KMCI_ENABLED options=0x%08X", options);
+        return STATUS_NOT_SUPPORTED;
+    }
+    return STATUS_SUCCESS;
 }
 
 static int HexValue(char c)
@@ -83,69 +134,142 @@ static BOOLEAN GuidTextMatches(const GUID* guid, const char* text)
         RtlCompareMemory(guid->Data4, d4, sizeof(d4)) == sizeof(d4);
 }
 
-static BOOLEAN LoadedPdbMatches(PVOID image, const ModuleIdentity* identity)
+typedef struct _RSDS_LOCAL {
+    ULONG signature;
+    GUID guid;
+    ULONG age;
+} RSDS_LOCAL;
+
+static BOOLEAN GetLoadedPdbIdentity(PVOID image, GUID* guid, ULONG* age)
 {
+    PIMAGE_NT_HEADERS nt = RtlImageNtHeader(image);
     ULONG directory_size = 0;
     PIMAGE_DEBUG_DIRECTORY debug = (PIMAGE_DEBUG_DIRECTORY)
         RtlImageDirectoryEntryToData(image, TRUE, IMAGE_DIRECTORY_ENTRY_DEBUG, &directory_size);
     ULONG count;
     ULONG i;
-    if (!debug || directory_size < sizeof(*debug) || !identity->pdb_guid)
+    if (!nt || nt->Signature != IMAGE_NT_SIGNATURE || !guid || !age ||
+        !debug || directory_size < sizeof(*debug))
+        return FALSE;
+    if ((ULONG_PTR)debug < (ULONG_PTR)image ||
+        (ULONG_PTR)debug - (ULONG_PTR)image > nt->OptionalHeader.SizeOfImage ||
+        directory_size > nt->OptionalHeader.SizeOfImage -
+            ((ULONG_PTR)debug - (ULONG_PTR)image))
         return FALSE;
     count = directory_size / sizeof(*debug);
     for (i = 0; i < count; ++i)
     {
         ULONG rva;
-        PULONG signature;
+        RSDS_LOCAL* rsds;
         if (debug[i].Type != IMAGE_DEBUG_TYPE_CODEVIEW)
             continue;
         rva = debug[i].AddressOfRawData;
-        if (!rva)
+        if (!rva || nt->OptionalHeader.SizeOfImage < sizeof(*rsds) ||
+            rva > nt->OptionalHeader.SizeOfImage - sizeof(*rsds))
             continue;
-        signature = (PULONG)((PUCHAR)image + rva);
-        if (*signature != 0x53445352u) /* RSDS */
+        rsds = (RSDS_LOCAL*)((PUCHAR)image + rva);
+        if (rsds->signature != 0x53445352u) /* RSDS */
             continue;
-        {
-            typedef struct _RSDS_LOCAL { ULONG signature; GUID guid; ULONG age; } RSDS_LOCAL;
-            RSDS_LOCAL* rsds = (RSDS_LOCAL*)signature;
-            return rsds->age == identity->pdb_age &&
-                GuidTextMatches(&rsds->guid, identity->pdb_guid);
-        }
+        *guid = rsds->guid;
+        *age = rsds->age;
+        return TRUE;
     }
     return FALSE;
 }
 
 static NTSTATUS ValidateLoadedKernelIdentity(PVOID image, const ModuleIdentity* identity)
 {
-    PIMAGE_NT_HEADERS nt = RtlImageNtHeader(image);
+    PIMAGE_NT_HEADERS nt;
+    GUID loaded_guid = { 0 };
+    ULONG loaded_age = 0;
+    BOOLEAN loaded_pdb = FALSE;
+
+    if (!image || !identity)
+    {
+        PUBGEXT_MAP_PRINT("identity", "fail invalid input%s", "");
+        return STATUS_INVALID_PARAMETER;
+    }
+    nt = RtlImageNtHeader(image);
     if (!nt || nt->Signature != IMAGE_NT_SIGNATURE)
+    {
+        PUBGEXT_MAP_PRINT("identity", "fail invalid nt header%s", "");
         return STATUS_INVALID_IMAGE_FORMAT;
-    if (nt->FileHeader.TimeDateStamp != identity->time_date_stamp ||
-        nt->OptionalHeader.SizeOfImage != identity->size_of_image ||
-        nt->OptionalHeader.CheckSum != identity->check_sum ||
-        !LoadedPdbMatches(image, identity))
+    }
+    if (nt->FileHeader.TimeDateStamp != identity->time_date_stamp)
+    {
+        PUBGEXT_MAP_PRINT("identity", "fail TDS expected=0x%08X observed=0x%08X",
+            identity->time_date_stamp, nt->FileHeader.TimeDateStamp);
+        return STATUS_NOT_SUPPORTED;
+    }
+    if (nt->OptionalHeader.SizeOfImage != identity->size_of_image)
+    {
+        PUBGEXT_MAP_PRINT("identity", "fail SizeOfImage expected=0x%08X observed=0x%08X",
+            identity->size_of_image, nt->OptionalHeader.SizeOfImage);
+        return STATUS_NOT_SUPPORTED;
+    }
+    if (nt->OptionalHeader.CheckSum != identity->check_sum)
+    {
+        PUBGEXT_MAP_PRINT("identity", "fail checksum expected=0x%08X observed=0x%08X",
+            identity->check_sum, nt->OptionalHeader.CheckSum);
+        return STATUS_NOT_SUPPORTED;
+    }
+    loaded_pdb = GetLoadedPdbIdentity(image, &loaded_guid, &loaded_age);
+    if (!loaded_pdb || loaded_age != identity->pdb_age ||
+        !GuidTextMatches(&loaded_guid, identity->pdb_guid))
+    {
+        if (loaded_pdb)
+        {
+            PUBGEXT_MAP_PRINT("identity",
+                "fail GUID expected=%s age=%u observed=%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X age=%u",
+                identity->pdb_guid ? identity->pdb_guid : "<missing>", identity->pdb_age, loaded_guid.Data1,
+                loaded_guid.Data2, loaded_guid.Data3, loaded_guid.Data4[0],
+                loaded_guid.Data4[1], loaded_guid.Data4[2], loaded_guid.Data4[3],
+                loaded_guid.Data4[4], loaded_guid.Data4[5], loaded_age);
+        }
+        else
+        {
+            PUBGEXT_MAP_PRINT("identity", "fail GUID expected=%s age=%u observed=<unavailable>",
+                identity->pdb_guid ? identity->pdb_guid : "<missing>", identity->pdb_age);
+        }
         return STATUS_REVISION_MISMATCH;
+    }
     {
         UNICODE_STRING path = RTL_CONSTANT_STRING(L"\\SystemRoot\\System32\\ntoskrnl.exe");
         OBJECT_ATTRIBUTES attributes;
         IO_STATUS_BLOCK io_status = { 0 };
         FILE_STANDARD_INFORMATION file_info = { 0 };
         HANDLE file = NULL;
+        NTSTATUS status;
         InitializeObjectAttributes(&attributes, &path,
             OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
-        if (!NT_SUCCESS(ZwOpenFile(&file, FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        status = ZwOpenFile(&file, FILE_READ_ATTRIBUTES | SYNCHRONIZE,
             &attributes, &io_status, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            FILE_SYNCHRONOUS_IO_NONALERT)) ||
-            !NT_SUCCESS(ZwQueryInformationFile(file, &io_status, &file_info,
-                sizeof(file_info), FileStandardInformation)))
+            FILE_SYNCHRONOUS_IO_NONALERT);
+        if (!NT_SUCCESS(status))
         {
-            if (file) ZwClose(file);
+            PUBGEXT_MAP_PRINT("identity", "fail ntoskrnl file open status=0x%08X", status);
             return STATUS_NOT_FOUND;
+        }
+        status = ZwQueryInformationFile(file, &io_status, &file_info,
+            sizeof(file_info), FileStandardInformation);
+        if (!NT_SUCCESS(status))
+        {
+            PUBGEXT_MAP_PRINT("identity", "fail ntoskrnl file query status=0x%08X", status);
+            ZwClose(file);
+            return status;
         }
         ZwClose(file);
         if (file_info.EndOfFile.QuadPart != identity->file_size)
+        {
+            PUBGEXT_MAP_PRINT("identity", "fail file_size expected=%I64u observed=%I64u",
+                (ULONGLONG)identity->file_size,
+                (ULONGLONG)file_info.EndOfFile.QuadPart);
             return STATUS_REVISION_MISMATCH;
+        }
     }
+    PUBGEXT_MAP_PRINT("identity", "ok TDS=0x%08X SizeOfImage=0x%08X checksum=0x%08X GUID=%s age=%u",
+        nt->FileHeader.TimeDateStamp, nt->OptionalHeader.SizeOfImage,
+        nt->OptionalHeader.CheckSum, identity->pdb_guid ? identity->pdb_guid : "<missing>", identity->pdb_age);
     return STATUS_SUCCESS;
 }
 
@@ -170,11 +294,31 @@ static NTSTATUS ValidateProfileRvas(PIMAGE_NT_HEADERS nt)
     if (!generated_profile.has_mm_allocate_independent_pages_rva ||
         !generated_profile.has_mm_set_page_protection_rva ||
         !generated_profile.has_mm_free_independent_pages_rva)
+    {
+        PUBGEXT_MAP_PRINT("rvas", "fail missing generated RVA flags alloc=%u protect=%u free=%u",
+            generated_profile.has_mm_allocate_independent_pages_rva,
+            generated_profile.has_mm_set_page_protection_rva,
+            generated_profile.has_mm_free_independent_pages_rva);
         return STATUS_NOT_SUPPORTED;
-    if (!RvaIsExecutable(nt, generated_profile.mm_allocate_independent_pages_rva) ||
-        !RvaIsExecutable(nt, generated_profile.mm_set_page_protection_rva) ||
-        !RvaIsExecutable(nt, generated_profile.mm_free_independent_pages_rva))
+    }
+    if (!RvaIsExecutable(nt, generated_profile.mm_allocate_independent_pages_rva))
+    {
+        PUBGEXT_MAP_PRINT("rvas", "fail allocate RVA=0x%08X is not executable",
+            generated_profile.mm_allocate_independent_pages_rva);
         return STATUS_INVALID_IMAGE_FORMAT;
+    }
+    if (!RvaIsExecutable(nt, generated_profile.mm_set_page_protection_rva))
+    {
+        PUBGEXT_MAP_PRINT("rvas", "fail protect RVA=0x%08X is not executable",
+            generated_profile.mm_set_page_protection_rva);
+        return STATUS_INVALID_IMAGE_FORMAT;
+    }
+    if (!RvaIsExecutable(nt, generated_profile.mm_free_independent_pages_rva))
+    {
+        PUBGEXT_MAP_PRINT("rvas", "fail free RVA=0x%08X is not executable",
+            generated_profile.mm_free_independent_pages_rva);
+        return STATUS_INVALID_IMAGE_FORMAT;
+    }
     return STATUS_SUCCESS;
 }
 
@@ -400,98 +544,223 @@ static NTSTATUS ManualMap(PDRIVER_OBJECT driver_object)
 {
     RTL_OSVERSIONINFOW version = { 0 };
     PVOID kernel_base = NULL;
-    PIMAGE_NT_HEADERS kernel_nt;
+    PIMAGE_NT_HEADERS kernel_nt = NULL;
     PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)&hexData;
     PIMAGE_NT_HEADERS payload_nt;
     PUBGEXT_PAYLOAD_INIT init = { 0 };
     PUBGEXT_PAYLOAD_INIT_RESULT result = { 0 };
     PUBGEXT_PAYLOAD_ENTRY entry;
+    PDRIVER_OBJECT effective_driver_object = driver_object;
     NTSTATUS status;
 
-    /* (1) version supported: derive the build from the generated profile. */
+    PUBGEXT_MAP_PRINT("manual-map", "entry driver_object=%p", driver_object);
+
+    /* The OS build is informational. Enablement packages can report SO=26200
+       while the loaded ntoskrnl file identity remains 26100. */
     version.dwOSVersionInfoSize = sizeof(version);
-    if (!NT_SUCCESS(RtlGetVersion(&version)) || !generated_profile.ntoskrnl.file_version)
-        return STATUS_NOT_SUPPORTED;
-    {
-        ULONG profile_build = 0;
-        const char* p = generated_profile.ntoskrnl.file_version;
-        while (*p && *p != '.') ++p;
-        if (*p) ++p; while (*p && *p != '.') ++p;
-        if (*p) ++p; while (*p >= '0' && *p <= '9') { profile_build = profile_build * 10 + (ULONG)(*p - '0'); ++p; }
-        if (!profile_build || version.dwBuildNumber != profile_build)
-            return STATUS_NOT_SUPPORTED;
-    }
-    /* (2) fail closed when kernel-mode HVCI is active. */
-    status = ValidateHvcIAndCi();
-    if (!NT_SUCCESS(status))
-        return status;
+    status = RtlGetVersion(&version);
+    if (NT_SUCCESS(status))
+        PUBGEXT_MAP_PRINT("version", "ok os_build=%lu profile_file_version=%s",
+            version.dwBuildNumber, generated_profile.ntoskrnl.file_version ?
+                generated_profile.ntoskrnl.file_version : "<missing>");
+    else
+        PUBGEXT_MAP_PRINT("version", "fail informational RtlGetVersion status=0x%08X; identity gate continues", status);
+
+    PUBGEXT_MAP_PRINT("kernel-image", "begin resolving loaded ntoskrnl%s", "");
     if (!RtlPcToFileHeader((PVOID)&RtlPcToFileHeader, &kernel_base) || !kernel_base)
+    {
+        PUBGEXT_MAP_PRINT("kernel-image", "fail RtlPcToFileHeader status=0x%08X",
+            STATUS_NOT_FOUND);
         return STATUS_NOT_FOUND;
+    }
     kernel_nt = RtlImageNtHeader(kernel_base);
     if (!kernel_nt)
+    {
+        PUBGEXT_MAP_PRINT("kernel-image", "fail RtlImageNtHeader status=0x%08X",
+            STATUS_INVALID_IMAGE_FORMAT);
         return STATUS_INVALID_IMAGE_FORMAT;
-    /* (3) loaded ntoskrnl identity and (4) exact generated profile selection. */
+    }
+    PUBGEXT_MAP_PRINT("kernel-image", "ok base=%p", kernel_base);
+
+    /* Fail closed on the loaded image identity before resolving any profile RVA. */
     status = ValidateLoadedKernelIdentity(kernel_base, &generated_profile.ntoskrnl);
     if (!NT_SUCCESS(status))
+    {
+        PUBGEXT_MAP_PRINT("identity", "fail status=0x%08X", status);
         return status;
+    }
+
+    /* Fail closed when kernel-mode HVCI is active. */
+    PUBGEXT_MAP_PRINT("hvci-ci", "begin%s", "");
+    status = ValidateHvcIAndCi();
+    if (!NT_SUCCESS(status))
+    {
+        PUBGEXT_MAP_PRINT("hvci-ci", "fail status=0x%08X", status);
+        return status;
+    }
+    PUBGEXT_MAP_PRINT("hvci-ci", "ok%s", "");
+
+    /* Exact generated profile selection. */
     if (!generated_profile.profile_id || generated_profile.ntoskrnl.file_size == 0)
+    {
+        PUBGEXT_MAP_PRINT("profile", "fail missing profile identity status=0x%08X",
+            STATUS_NOT_SUPPORTED);
         return STATUS_NOT_SUPPORTED;
-    /* (5) every generated RVA must resolve to an executable section. */
+    }
+    PUBGEXT_MAP_PRINT("profile", "ok id=%s file_size=%lu", generated_profile.profile_id,
+        generated_profile.ntoskrnl.file_size);
+
+    /* Every generated RVA must resolve to an executable section. */
+    PUBGEXT_MAP_PRINT("rvas", "begin%s", "");
     status = ValidateProfileRvas(kernel_nt);
     if (!NT_SUCCESS(status))
+    {
+        PUBGEXT_MAP_PRINT("rvas", "fail status=0x%08X", status);
         return status;
+    }
+    PUBGEXT_MAP_PRINT("rvas", "ok allocate=0x%08X protect=0x%08X free=0x%08X",
+        generated_profile.mm_allocate_independent_pages_rva,
+        generated_profile.mm_set_page_protection_rva,
+        generated_profile.mm_free_independent_pages_rva);
 
     if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 ||
         (SIZE_T)dos->e_lfanew > sizeof(hexData) - sizeof(IMAGE_NT_HEADERS))
+    {
+        PUBGEXT_MAP_PRINT("payload-header", "fail DOS header status=0x%08X",
+            STATUS_INVALID_IMAGE_FORMAT);
         return STATUS_INVALID_IMAGE_FORMAT;
+    }
     payload_nt = (PIMAGE_NT_HEADERS)((PUCHAR)&hexData + dos->e_lfanew);
     if (payload_nt->Signature != IMAGE_NT_SIGNATURE ||
         payload_nt->OptionalHeader.SizeOfImage == 0)
+    {
+        PUBGEXT_MAP_PRINT("payload-header", "fail NT header status=0x%08X",
+            STATUS_INVALID_IMAGE_FORMAT);
         return STATUS_INVALID_IMAGE_FORMAT;
+    }
+    PUBGEXT_MAP_PRINT("payload-header", "ok image_size=0x%08X entry=0x%08X",
+        payload_nt->OptionalHeader.SizeOfImage,
+        payload_nt->OptionalHeader.AddressOfEntryPoint);
     status = ValidateImageLayout(&hexData, sizeof(hexData), payload_nt);
     if (!NT_SUCCESS(status))
+    {
+        PUBGEXT_MAP_PRINT("payload-layout", "fail status=0x%08X", status);
         return status;
+    }
     if (!RvaRangeValid(payload_nt, payload_nt->OptionalHeader.AddressOfEntryPoint,
         sizeof(UCHAR)))
+    {
+        PUBGEXT_MAP_PRINT("payload-layout", "fail entry RVA status=0x%08X",
+            STATUS_INVALID_IMAGE_FORMAT);
         return STATUS_INVALID_IMAGE_FORMAT;
+    }
+    PUBGEXT_MAP_PRINT("payload-layout", "ok%s", "");
 
     g_allocate_pages = (MmAllocateIndependentPages_t)((PUCHAR)kernel_base + generated_profile.mm_allocate_independent_pages_rva);
     g_set_page_protection = (MmSetPageProtection_t)((PUCHAR)kernel_base + generated_profile.mm_set_page_protection_rva);
     g_free_pages = (MmFreeIndependentPages_t)((PUCHAR)kernel_base + generated_profile.mm_free_independent_pages_rva);
-    /* (6) map only after all preflight checks have passed. */
+    if (!g_allocate_pages || !g_set_page_protection || !g_free_pages)
+    {
+        PUBGEXT_MAP_PRINT("rvas", "fail resolved routine pointer status=0x%08X",
+            STATUS_PROCEDURE_NOT_FOUND);
+        return STATUS_PROCEDURE_NOT_FOUND;
+    }
+
+    /* Map only after all preflight checks have passed. */
     g_allocated_size = payload_nt->OptionalHeader.SizeOfImage;
+    PUBGEXT_MAP_PRINT("allocation", "begin size=0x%Ix", g_allocated_size);
     g_allocated_memory = g_allocate_pages(g_allocated_size, (ULONG)-1);
     if (!g_allocated_memory)
+    {
+        PUBGEXT_MAP_PRINT("allocation", "fail status=0x%08X",
+            STATUS_INSUFFICIENT_RESOURCES);
         return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    PUBGEXT_MAP_PRINT("allocation", "ok base=%p", g_allocated_memory);
+
+    if (!effective_driver_object)
+    {
+        status = FabricateDriverObject(g_allocated_memory, g_allocated_size,
+            &effective_driver_object);
+        if (!NT_SUCCESS(status))
+        {
+            PUBGEXT_MAP_PRINT("driver-object",
+                "fail fabricate status=0x%08X tag=0x%08X", status,
+                PUBGEXT_FABRICATED_DRIVER_TAG);
+            goto map_failure;
+        }
+        PUBGEXT_MAP_PRINT("driver-object",
+            "ok fabricated=%p type=%u size=%u start=%p driver_size=%lu",
+            effective_driver_object, effective_driver_object->Type,
+            effective_driver_object->Size,
+            effective_driver_object->DriverStart,
+            effective_driver_object->DriverSize);
+    }
+    else
+    {
+        PUBGEXT_MAP_PRINT("driver-object", "ok received=%p", effective_driver_object);
+    }
+
+    PUBGEXT_MAP_PRINT("protection", "begin%s", "");
     if (!g_set_page_protection(g_allocated_memory, g_allocated_size, PAGE_EXECUTE_READWRITE))
     {
         status = STATUS_UNSUCCESSFUL;
+        PUBGEXT_MAP_PRINT("protection", "fail status=0x%08X", status);
         goto map_failure;
     }
+    PUBGEXT_MAP_PRINT("protection", "ok%s", "");
+    PUBGEXT_MAP_PRINT("copy", "begin%s", "");
     status = CopyHeadersAndSections(&hexData, sizeof(hexData),
         g_allocated_memory, payload_nt);
-    if (!NT_SUCCESS(status)) goto map_failure;
+    if (!NT_SUCCESS(status))
+    {
+        PUBGEXT_MAP_PRINT("copy", "fail status=0x%08X", status);
+        goto map_failure;
+    }
+    PUBGEXT_MAP_PRINT("copy", "ok%s", "");
+    PUBGEXT_MAP_PRINT("relocations", "begin%s", "");
     status = FixRelocations(g_allocated_memory, payload_nt);
-    if (!NT_SUCCESS(status)) goto map_failure;
+    if (!NT_SUCCESS(status))
+    {
+        PUBGEXT_MAP_PRINT("relocations", "fail status=0x%08X", status);
+        goto map_failure;
+    }
+    PUBGEXT_MAP_PRINT("relocations", "ok%s", "");
+    PUBGEXT_MAP_PRINT("imports", "begin%s", "");
     status = FixIat(g_allocated_memory, payload_nt);
-    if (!NT_SUCCESS(status)) goto map_failure;
+    if (!NT_SUCCESS(status))
+    {
+        PUBGEXT_MAP_PRINT("imports", "fail status=0x%08X", status);
+        goto map_failure;
+    }
+    PUBGEXT_MAP_PRINT("imports", "ok%s", "");
 
     entry = (PUBGEXT_PAYLOAD_ENTRY)((PUCHAR)g_allocated_memory + payload_nt->OptionalHeader.AddressOfEntryPoint);
     init.struct_size = sizeof(init);
     init.abi_major = PUBGEXT_PAYLOAD_ABI_MAJOR;
     init.abi_minor = PUBGEXT_PAYLOAD_ABI_MINOR;
-    init.driver_object = (uint64_t)(ULONG_PTR)driver_object;
+    init.driver_object = (uint64_t)(ULONG_PTR)effective_driver_object;
+    PUBGEXT_MAP_PRINT("payload-init", "begin entry=%p", entry);
     status = (NTSTATUS)entry(&init, &result);
+    PUBGEXT_MAP_PRINT("payload-init", "returned status=0x%08X payload_status=0x%08X device_created=%lu",
+        status, (NTSTATUS)result.status, result.device_created);
     if (!NT_SUCCESS(status) || !result.device_created)
     {
         /* The payload creates the device atomically; failed init leaves none. */
         status = NT_SUCCESS(status) ? STATUS_UNSUCCESSFUL : status;
+        PUBGEXT_MAP_PRINT("payload-init", "fail status=0x%08X", status);
+        PUBGEXT_MAP_PRINT("device", "fail payload_status=0x%08X created=%lu",
+            (NTSTATUS)result.status, result.device_created);
         goto map_failure;
     }
+    PUBGEXT_MAP_PRINT("device", "ok created=1 status=0x%08X", STATUS_SUCCESS);
+    PUBGEXT_MAP_PRINT("manual-map", "ok status=0x%08X", STATUS_SUCCESS);
     return STATUS_SUCCESS;
 
 map_failure:
     /* (7) a failed payload never leaves the mapped image or a device behind. */
+    PUBGEXT_MAP_PRINT("cleanup", "release mapped image status=0x%08X", status);
+    ReleaseFabricatedDriverObject();
     ReleaseMappedImage();
     return status;
 }
@@ -499,7 +768,16 @@ map_failure:
 NTSTATUS DriverEntry(PDRIVER_OBJECT driver_object, PUNICODE_STRING registry_path)
 {
     UNREFERENCED_PARAMETER(registry_path);
-    /* Mapper unload is disabled because its mapped payload is intentionally resident. */
-    driver_object->DriverUnload = NULL;
+    PUBGEXT_MAP_PRINT("entry", "begin driver_object=%p", driver_object);
+    if (driver_object)
+    {
+        /* Mapper unload is disabled because its mapped payload is intentionally resident. */
+        driver_object->DriverUnload = NULL;
+        PUBGEXT_MAP_PRINT("entry", "received DriverUnload=NULL%s", "");
+    }
+    else
+    {
+        PUBGEXT_MAP_PRINT("entry", "kdmapper path: driver_object=NULL; factory path%s", "");
+    }
     return ManualMap(driver_object);
 }
