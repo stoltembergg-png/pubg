@@ -1,5 +1,7 @@
 #include "Apex.h"
 
+#include <cstring>
+
 struct GlowMode
 {
     int8_t GeneralGlowMode, BorderGlowMode, BorderSize, TransparentLevel;

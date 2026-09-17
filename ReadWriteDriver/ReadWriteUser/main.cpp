@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <string>
 #include <vector>
 
 namespace
@@ -16,6 +17,79 @@ namespace
     HANDLE g_device = INVALID_HANDLE_VALUE;
     uint32_t g_max_transfer = 0;
     uint64_t g_next_request_id = 1;
+
+    std::string WideToUtf8(const std::wstring& value)
+    {
+        if (value.empty())
+            return {};
+
+        const int required = WideCharToMultiByte(
+            CP_UTF8, 0, value.data(), static_cast<int>(value.size()),
+            nullptr, 0, nullptr, nullptr);
+        if (!required)
+            return {};
+
+        std::string result(static_cast<size_t>(required), '\0');
+        if (!WideCharToMultiByte(CP_UTF8, 0, value.data(),
+                                 static_cast<int>(value.size()),
+                                 &result[0], required, nullptr, nullptr))
+            return {};
+        return result;
+    }
+
+    bool GetExecutablePath(std::wstring& path)
+    {
+        std::vector<wchar_t> buffer(260);
+        for (;;)
+        {
+            const DWORD length = GetModuleFileNameW(
+                nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+            if (!length)
+                return false;
+
+            if (length < buffer.size() - 1 || buffer.size() >= 32768)
+            {
+                path.assign(buffer.data(), length);
+                return true;
+            }
+            buffer.resize(buffer.size() * 2);
+        }
+    }
+
+    std::wstring CanonicalExecutablePath(const std::wstring& rawPath)
+    {
+        std::wstring path = rawPath;
+        if (path.rfind(L"\\\\?\\", 0) == 0 ||
+            path.rfind(L"\\??\\", 0) == 0)
+        {
+            path.erase(0, 4);
+        }
+
+        CharUpperBuffW(&path[0], static_cast<DWORD>(path.size()));
+        return L"\\??\\" + path;
+    }
+
+    void PrintExecutablePathDiagnostics()
+    {
+        std::wstring rawPath;
+        if (!GetExecutablePath(rawPath))
+        {
+            std::printf("Could not determine executable image path for driver "
+                        "allowlist comparison (Win32 error %lu)\n",
+                        GetLastError());
+            return;
+        }
+
+        const std::string rawUtf8 = WideToUtf8(rawPath);
+        const std::string canonicalUtf8 =
+            WideToUtf8(CanonicalExecutablePath(rawPath));
+        std::printf("Executable image path for driver allowlist comparison "
+                    "(RAW): %s\n",
+                    rawUtf8.c_str());
+        std::printf("Executable image path for driver allowlist comparison "
+                    "(CANONICAL): %s\n",
+                    canonicalUtf8.c_str());
+    }
 
     void DebugLog(const char* message)
     {
@@ -96,9 +170,25 @@ bool InitializeDevice()
                            nullptr);
     if (g_device == INVALID_HANDLE_VALUE)
     {
-        std::printf("Could not open \\\\.\\PubgExtRw (error %lu). "
-                    "The driver must already be loaded and this tool elevated.\n",
-                    GetLastError());
+        const DWORD error = GetLastError();
+        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+        {
+            std::printf("Could not open \\\\.\\PubgExtRw: Win32 error %lu - "
+                        "device does not exist (driver not loaded).\n",
+                        error);
+        }
+        else if (error == ERROR_ACCESS_DENIED)
+        {
+            std::printf("Could not open \\\\.\\PubgExtRw: Win32 error %lu - "
+                        "device exists, access denied (driver allowlist "
+                        "mismatch).\n",
+                        error);
+        }
+        else
+        {
+            std::printf("Could not open \\\\.\\PubgExtRw: Win32 error %lu.\n",
+                        error);
+        }
         return false;
     }
 
@@ -385,6 +475,7 @@ bool RunDriverSmokeTest()
 int main()
 {
     char input = 0;
+    PrintExecutablePathDiagnostics();
     std::printf("1) Connect and run IOCTL smoke test\n");
     std::printf("2) Find notepad.exe by name\n");
     std::printf("3) Halo MCC\n");

@@ -1,5 +1,7 @@
 #include "Halo.h"
 
+#include <cstdio>
+
 #define halo3_magic_address 0x1AB9BA8
 #define haloreach_magic_address 0x23EC960
 
